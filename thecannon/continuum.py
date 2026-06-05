@@ -12,6 +12,7 @@ __all__ = ["normalize", "sines_and_cosines"]
 
 import logging
 import numpy as np
+import jax.numpy as jnp
 
 
 def _continuum_design_matrix(dispersion, L, order):
@@ -158,18 +159,21 @@ def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
             continuum_flux, continuum_ivar \
                 = (object_flux[continuum_mask], object_ivar[continuum_mask])
 
-            # Solve for the amplitudes.
-            M = continuum_matrix
-            MTM = np.dot(M, continuum_ivar[:, None] * M.T)
-            MTy = np.dot(M, (continuum_ivar * continuum_flux).T)
+            # Solve for the amplitudes (linear algebra performed in JAX).
+            M = jnp.asarray(continuum_matrix)
+            civ = jnp.asarray(continuum_ivar)
+            cfl = jnp.asarray(continuum_flux)
+            MTM = jnp.dot(M, civ[:, None] * M.T)
+            MTy = jnp.dot(M, civ * cfl)
 
-            eigenvalues = np.linalg.eigvalsh(MTM)
-            MTM[np.diag_indices(len(MTM))] += scalar * np.max(eigenvalues)
-            eigenvalues = np.linalg.eigvalsh(MTM)
-            condition_number = max(eigenvalues)/min(eigenvalues)
+            eigenvalues = jnp.linalg.eigvalsh(MTM)
+            MTM = MTM + jnp.eye(MTM.shape[0]) * (scalar * jnp.max(eigenvalues))
+            eigenvalues = jnp.linalg.eigvalsh(MTM)
+            condition_number = float(jnp.max(eigenvalues) / jnp.min(eigenvalues))
 
-            amplitudes = np.linalg.solve(MTM, MTy)
-            continuum[i, region_mask] = np.dot(region_matrix.T, amplitudes)
+            amplitudes = np.asarray(jnp.linalg.solve(MTM, MTy))
+            continuum[i, region_mask] = np.asarray(
+                jnp.dot(jnp.asarray(region_matrix).T, jnp.asarray(amplitudes)))
             object_metadata.append(
                 (order, L, fill_value, scalar, amplitudes, condition_number))
 

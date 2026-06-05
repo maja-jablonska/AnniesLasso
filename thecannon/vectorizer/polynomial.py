@@ -11,6 +11,8 @@ from __future__ import (division, print_function, absolute_import,
 __all__ = ["PolynomialVectorizer"]
 
 import numpy as np
+import jax
+import jax.numpy as jnp
 from collections import (Counter, OrderedDict)
 from itertools import combinations_with_replacement
 from six import string_types
@@ -71,17 +73,17 @@ class PolynomialVectorizer(BaseVectorizer):
             two-dimensional array of `N` by `K` labels.
         """
 
-        labels = np.atleast_2d(labels)
+        labels = jnp.atleast_2d(labels)
         if labels.ndim > 2:
             raise ValueError("labels must be a 1-d or 2-d array")
 
-        columns = [np.ones(labels.shape[0], dtype=float)]
+        columns = [jnp.ones(labels.shape[0], dtype=float)]
         for term in self.terms:
             column = 1. # This works; don't use np.multiply/np.product.
             for index, order in term:
-                column *= labels[:, index]**order
+                column = column * labels[:, index]**order
             columns.append(column)
-        return np.vstack(columns)
+        return jnp.vstack(columns)
 
 
     def get_label_vector_derivative(self, labels):
@@ -96,33 +98,14 @@ class PolynomialVectorizer(BaseVectorizer):
             where `D` is the number of terms in the label vector description.
         """
 
-        L, T = (len(labels), len(self.terms))
-
-        slicer = np.arange(L)
-        indices_used = np.zeros(L, dtype=bool)
-
-        columns = np.ones((T + 1, L), dtype=float)
-        columns[0] = 0.0 # First theta derivative always zero.
-
-        for t, term in enumerate(self.terms, start=1):
-                
-            indices_used[:] = False
-            
-            for index, order in term:
-
-                dy = order * (labels[index]**(order - 1))
-                y = labels[index]**order
-
-                # If it's the index w.r.t. it, take derivative.
-                columns[t, index] *= dy
-
-                # Otherwise, calculate as normal.
-                columns[t, slicer != index] *= y
-                indices_used[index] = True
-
-            columns[t, ~indices_used] = 0
-
-        return columns
+        # The label vector derivative is the Jacobian of the (single-sample)
+        # label vector with respect to the labels. Rather than maintaining a
+        # hand-written derivative, we obtain it exactly via JAX forward-mode
+        # autodiff. The output shape is `(T + 1, L)` where `T = len(self.terms)`
+        # and `L = len(labels)`; the first row (the constant pivot term) is zero.
+        labels = jnp.asarray(labels, dtype=float)
+        single_label_vector = lambda l: self.get_label_vector(l)[:, 0]
+        return jax.jacfwd(single_label_vector)(labels)
 
 
     def get_human_readable_label_vector(self, mul="*", pow="^", bracket=False):

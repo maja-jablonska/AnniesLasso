@@ -13,6 +13,8 @@ __all__ = ["CannonModel"]
 import logging
 import multiprocessing as mp
 import numpy as np
+import jax
+import jax.numpy as jnp
 import os
 import pickle
 from datetime import datetime
@@ -497,16 +499,19 @@ class CannonModel(object):
             attributes.remote("metadata")
 
         # Store up all the trained attributes and a hash of the training set.
+        # Only the vectorizer and censors are serialized via their custom
+        # `__getstate__` (the vectorizer to a (name, kwds) tuple and the censors
+        # to a dict); everything else (numpy arrays, scalars) is stored as-is.
+        # NB: numpy>=2.0 defines `ndarray.__getstate__` (returning None), so the
+        # historical broad ``value.__getstate__()`` call would corrupt arrays.
         state = {}
         for attribute in attributes:
 
             value = getattr(self, attribute)
 
-            try:
-                # If it's a vectorizer or censoring dict, etc, get the state.
+            if attribute in ("vectorizer", "censors") and value is not None \
+            and hasattr(value, "__getstate__"):
                 value = value.__getstate__()
-            except:
-                None
 
             state[attribute] = value
 
@@ -612,12 +617,13 @@ class CannonModel(object):
             the training of each pixel.
         """
 
-        kwds = dict(op_method=op_method, op_strict=op_strict, op_kwds=op_kwds)
-        kwds.update(kwargs)
-
         if self.training_set_flux is None or self.training_set_ivar is None:
             raise TypeError(
                 "cannot train: training set spectra not saved with the model")
+
+        if threads not in (1, None):
+            logger.warn("The `threads` argument is deprecated and ignored: "
+                        "training is vectorized with jax.vmap.")
 
         S, P = self.training_set_flux.shape
         T = self.design_matrix.shape[1]
@@ -625,40 +631,71 @@ class CannonModel(object):
         logger.info("Training {0}-label {1} with {2} stars and {3} pixels/star"\
             .format(len(self.vectorizer.label_names), type(self).__name__, S, P))
 
-        # Parallelise out.
-        if threads in (1, None):
-            mapper, pool = (map, None)
+        op_method = op_method or "l_bfgs_b"
+        op_kwds = op_kwds or {}
+        maxiter = op_kwds.get("maxiter", fitting._TRAIN_MAXITER)
+        tol = op_kwds.get("tol", fitting._TRAIN_TOL)
 
+        # Optional box constraints on theta (used by RestrictedCannonModel). The
+        # bounds are given as a list of (min, max) tuples per term, with None
+        # indicating no limit on that side.
+        bounds = op_kwds.get("bounds", None)
+        if bounds is not None:
+            lower = jnp.asarray(
+                [(-jnp.inf if lo is None else lo) for lo, _ in bounds],
+                dtype=float)
+            upper = jnp.asarray(
+                [(jnp.inf if hi is None else hi) for _, hi in bounds],
+                dtype=float)
+            bounds = (lower, upper)
+
+        # Batched (pixel-major) flux and inverse variance.
+        flux_PN = jnp.asarray(self.training_set_flux.T)    # (P, N)
+        ivar_PN = jnp.asarray(self.training_set_ivar.T)    # (P, N)
+        design_matrix = jnp.asarray(self.design_matrix)    # (N, T)
+
+        fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
+
+        # Initial theta guesses for every pixel: a linear-algebra estimate and
+        # the fiducial value. The regularized objective is convex, so the
+        # optimum is independent of the starting point; these only set where the
+        # optimizer begins.
+        linalg_theta = jax.vmap(
+            lambda f, i: fitting.fit_theta_by_linalg(f, i, 0.0, design_matrix)[0]
+        )(flux_PN, ivar_PN)                                 # (P, T)
+        finite = jnp.all(jnp.isfinite(linalg_theta), axis=1, keepdims=True)
+        linalg_theta = jnp.where(finite, linalg_theta, fiducial[None, :])
+        init_stack = jnp.stack(
+            [linalg_theta, jnp.broadcast_to(fiducial, (P, T))], axis=1)  # (P,2,T)
+
+        # Per-pixel column mask: True keeps the coefficient, False censors it.
+        if self.censors and len(set(self.censors).intersection(
+                self.vectorizer.label_names)) > 0:
+            column_mask = jnp.asarray(
+                censoring.design_matrix_mask(self.censors, self.vectorizer))
         else:
-            pool = mp.Pool(threads)
-            mapper = pool.map
+            column_mask = jnp.ones((P, T), dtype=bool)
 
-        func = utils.wrapper(fitting.fit_pixel_fixed_scatter, None, kwds, P)
+        # Per-pixel regularization strength.
+        reg = 0.0 if self.regularization is None else self.regularization
+        reg_P = jnp.broadcast_to(jnp.asarray(reg, dtype=float), (P,))
 
-        meta = []
-        theta = np.nan * np.ones((P, T))
-        s2 = np.nan * np.ones(P)
+        fitter = fitting.make_pixel_fitter(
+            op_method=op_method, maxiter=maxiter, tol=tol, bounds=bounds)
+        batched = jax.jit(jax.vmap(
+            fitter, in_axes=(0, 0, 0, None, 0, 0)))
 
-        for pixel, (flux, ivar) \
-        in enumerate(zip(self.training_set_flux.T, self.training_set_ivar.T)):
+        theta, s2, fopt = batched(
+            flux_PN, ivar_PN, init_stack, design_matrix, reg_P, column_mask)
 
-            args = (
-                flux, ivar, 
-                self._initial_theta(pixel),
-                self._censored_design_matrix(pixel),
-                self._pixel_access(self.regularization, pixel, 0.0),
-                None
-            )
-            (pixel_theta, pixel_s2, pixel_meta), = mapper(func, [args])
+        theta = np.asarray(theta)
+        s2 = np.asarray(s2)
+        fopt = np.asarray(fopt)
 
-            meta.append(pixel_meta)
-            theta[pixel], s2[pixel] = (pixel_theta, pixel_s2)
+        meta = [dict(op_method=op_method, fopt=float(fopt[p]),
+                     maxiter=maxiter, tol=tol) for p in range(P)]
 
         self._theta, self._s2 = (theta, s2)
-
-        if pool is not None:
-            pool.close()
-            pool.join()
 
         return (theta, s2, meta)
 
@@ -674,7 +711,7 @@ class CannonModel(object):
 
         # Scale and offset the labels.
         scaled_labels = (np.atleast_2d(labels) - self._fiducials)/self._scales
-        flux = np.dot(self.theta, self.vectorizer(scaled_labels)).T
+        flux = np.dot(self.theta, np.asarray(self.vectorizer(scaled_labels))).T
         return flux[0] if flux.shape[0] == 1 else flux
 
 
@@ -712,12 +749,9 @@ class CannonModel(object):
         if op_kwds is None:
             op_kwds = dict()
 
-        if threads in (1, None):
-            mapper, pool = (map, None)
-
-        else:
-            pool = mp.Pool(threads)
-            mapper = pool.map
+        if threads not in (1, None):
+            logger.warn("The `threads` argument is deprecated and ignored: the "
+                        "test step is vectorized with jax.vmap.")
 
         flux, ivar = (np.atleast_2d(flux), np.atleast_2d(ivar))
         S, P = flux.shape
@@ -725,28 +759,43 @@ class CannonModel(object):
         if ivar.shape != flux.shape:
             raise ValueError("flux and ivar arrays must be the same shape")
 
+        L = len(self._fiducials)
+
         if initial_labels is None:
             initial_labels = self._fiducials
 
-        initial_labels = np.atleast_2d(initial_labels)
-        if initial_labels.shape[0] != S and len(initial_labels.shape) == 2:
-            initial_labels = np.tile(initial_labels.flatten(), S)\
-                             .reshape(S, -1, len(self._fiducials))
+        # Coerce initial labels to shape (S, n_init, L).
+        initial_labels = np.atleast_2d(np.asarray(initial_labels, dtype=float))
+        if initial_labels.shape == (S, L):
+            initial_labels = initial_labels[:, None, :]   # one start per star
+        elif initial_labels.ndim == 2:
+            initial_labels = np.tile(initial_labels[None], (S, 1, 1))  # shared
+        elif initial_labels.ndim == 3 and initial_labels.shape[0] != S:
+            initial_labels = np.tile(initial_labels, (S, 1, 1))
 
-        args = (self.vectorizer, self.theta, self.s2, self._fiducials, 
-            self._scales)
-        kwargs = dict(use_derivatives=use_derivatives, op_kwds=op_kwds)
+        maxiter = op_kwds.get("maxiter", fitting._TEST_MAXITER)
+        tol = op_kwds.get("tol", fitting._TEST_TOL)
 
-        func = utils.wrapper(fitting.fit_spectrum, args, kwargs, S,
-            message="Running test step on {} spectra".format(S))
+        core = fitting.make_spectrum_fitter(
+            self.vectorizer, self.theta, self.s2, self._fiducials,
+            self._scales, maxiter=maxiter, tol=tol)
+        batched = jax.jit(jax.vmap(core, in_axes=(0, 0, 0)))
 
-        labels, cov, meta = zip(*mapper(func, zip(*(flux, ivar, initial_labels))))
+        op_labels, cov, chi_sq, model_flux, n_use = batched(
+            jnp.asarray(flux), jnp.asarray(ivar), jnp.asarray(initial_labels))
 
-        if pool is not None:
-            pool.close()
-            pool.join()
+        op_labels = np.asarray(op_labels)
+        cov = np.asarray(cov)
+        chi_sq = np.asarray(chi_sq)
+        n_use = np.asarray(n_use)
 
-        return (np.array(labels), np.array(cov), meta)
+        meta = [dict(chi_sq=float(chi_sq[s]),
+                     r_chi_sq=float(chi_sq[s]) / max(1, int(n_use[s]) - L - 1),
+                     method="levenberg_marquardt",
+                     label_names=self.vectorizer.label_names)
+                for s in range(S)]
+
+        return (op_labels, cov, meta)
 
 
     def _initial_theta(self, pixel_index, **kwargs):

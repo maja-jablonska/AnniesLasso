@@ -16,7 +16,10 @@ import sys
 from six import string_types
 from tempfile import mkstemp
 from time import time
-from collections import Iterable
+try:
+    from collections.abc import Iterable
+except ImportError:
+    from collections import Iterable
 from hashlib import md5
 from multiprocessing.pool import Pool
 from multiprocessing import Lock, TimeoutError, Value
@@ -36,6 +39,11 @@ class wrapper(object):
     """
     A generic wrapper with a progressbar, which can be used either in serial or
     in parallel.
+
+    .. deprecated::
+        The training and test steps are now vectorized with ``jax.vmap`` and no
+        longer use this multiprocessing wrapper. It is retained only for
+        backwards-compatible imports.
 
     :param f:
         The function to apply.
