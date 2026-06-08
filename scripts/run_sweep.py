@@ -54,13 +54,74 @@ except ImportError:
 logger = logging.getLogger("thecannon.run_sweep")
 
 
-def default_label_sets(labels):
-    """ Nested label sets (first 3, first 5, all) -- 'does adding labels help?' """
+def build_label_sets(base_core, age_cols, mass_col, abundances, mode):
+    """
+    Build the grid of label sets from a fixed core, one or more age columns
+    (each making a base variant), an optional mass column, and a list of
+    abundances. ``mode`` controls how the extras are added on top of each base:
+
+      - ``one-at-a-time``: base, base+mass, base+each abundance, base+all
+        abundances, base+mass+all abundances. Isolates each addition's effect.
+      - ``cumulative``: base -> +mass -> +abund1 -> +abund2 -> ... (each set a
+        superset of the previous).
+      - ``minimal``: base, base+all abundances, base+mass, base+mass+all
+        abundances.
+    """
+    def dedup(seq):
+        return tuple(dict.fromkeys(seq))        # drop dupes, preserve order
+
     sets = []
-    for k in (3, 5, len(labels)):
-        if 1 <= k <= len(labels):
-            sets.append(tuple(labels[:k]))
-    return list(dict.fromkeys(sets))            # dedup, preserve order
+    for age in age_cols:
+        base = list(base_core) + ([age] if age else [])
+        sets.append(dedup(base))
+
+        if mode == "one-at-a-time":
+            if mass_col:
+                sets.append(dedup(base + [mass_col]))
+            for a in abundances:
+                sets.append(dedup(base + [a]))
+            if abundances:
+                sets.append(dedup(base + list(abundances)))
+            if mass_col and abundances:
+                sets.append(dedup(base + [mass_col] + list(abundances)))
+
+        elif mode == "cumulative":
+            current = list(base)
+            if mass_col:
+                current.append(mass_col)
+                sets.append(dedup(current))
+            for a in abundances:
+                current.append(a)
+                sets.append(dedup(current))
+
+        elif mode == "minimal":
+            if abundances:
+                sets.append(dedup(base + list(abundances)))
+            if mass_col:
+                sets.append(dedup(base + [mass_col]))
+            if mass_col and abundances:
+                sets.append(dedup(base + [mass_col] + list(abundances)))
+
+    return list(dict.fromkeys(sets))            # dedup whole sets across ages
+
+
+def _has_column(label_source, name):
+    """ True if ``name`` is a column of the table / key of the mapping. """
+    columns = getattr(label_source, "columns", None)
+    return (name in columns) if columns is not None else (name in label_source)
+
+
+def filter_existing(label_sets, label_source):
+    """ Drop label sets that reference a column missing from the data. """
+    kept = []
+    for label_set in label_sets:
+        missing = [n for n in label_set if not _has_column(label_source, n)]
+        if missing:
+            logger.warning("skipping label set %s (missing columns: %s)",
+                           "+".join(label_set), ",".join(missing))
+        else:
+            kept.append(label_set)
+    return kept
 
 
 def finite_label_mapping(label_source, label_union):
@@ -88,13 +149,28 @@ def main():
     parser.add_argument("--continuum-list",
                         default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
                         help="text file of continuum pixel indices")
-    parser.add_argument("--labels", type=lambda s: s.split(","),
-                        default=DEFAULT_LABELS,
-                        help="comma-separated master list of label columns")
+    parser.add_argument("--base", type=lambda s: s.split(","),
+                        default=["raw_teff", "raw_logg", "raw_fe_h", "raw_mg_h"],
+                        help="comma-separated core labels in every set (the age "
+                             "column from --age-cols is appended to this)")
+    parser.add_argument("--age-cols", type=lambda s: s.split(","),
+                        default=["age_Dnu", "age_L"],
+                        help="age column(s); each makes a separate base variant "
+                             "(missing columns are skipped)")
+    parser.add_argument("--mass-col", default="mass_L",
+                        help="mass column added by the 'age and mass' sets "
+                             "(empty string to disable)")
+    parser.add_argument("--abundances", type=lambda s: s.split(","),
+                        default=["raw_ce_h", "raw_ca_h", "raw_si_h", "raw_ni_h",
+                                 "raw_mn_h", "raw_al_h", "raw_c_h", "raw_n_h"],
+                        help="comma-separated abundances to test on top of base")
+    parser.add_argument("--label-set-mode", default="one-at-a-time",
+                        choices=["one-at-a-time", "cumulative", "minimal"],
+                        help="how extras are combined with each base")
     parser.add_argument("--label-set", dest="label_sets", action="append",
                         type=lambda s: tuple(s.split(",")), default=None,
-                        help="a label set to try (repeatable); defaults to "
-                             "nested subsets of --labels")
+                        help="explicit label set to try (repeatable); overrides "
+                             "the builder when given")
     parser.add_argument("--orders", type=lambda s: [int(x) for x in s.split(",")],
                         default=[1, 2], help="comma-separated polynomial orders")
     parser.add_argument("--regularizations",
@@ -143,8 +219,13 @@ def main():
         label_source, dispersion, flux, ivar = load_spectra(args.spectra)
         norm_flux, norm_ivar = normalize_spectra(
             dispersion, flux, ivar, args.continuum_list)
-        labels_master = args.labels
-        label_sets = args.label_sets or default_label_sets(labels_master)
+        label_sets = args.label_sets or build_label_sets(
+            args.base, args.age_cols, args.mass_col, args.abundances,
+            args.label_set_mode)
+        label_sets = filter_existing(label_sets, label_source)
+        if not label_sets:
+            raise ValueError("no usable label sets (all referenced columns "
+                             "missing); check --base/--age-cols/--abundances")
         n_splits = args.n_splits
 
     # Union of every label used by any label set; drop non-finite stars once.
@@ -154,6 +235,8 @@ def main():
 
     logger.info("sweeping %d label sets x %d orders x %d regularizations",
                 len(label_sets), len(args.orders), len(args.regularizations))
+    for label_set in label_sets:
+        logger.info("  label set: %s", "+".join(label_set))
 
     sweep(
         mapping, norm_flux[finite], norm_ivar[finite], dispersion,
