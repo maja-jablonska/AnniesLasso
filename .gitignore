@@ -13,3 +13,7 @@ sandbox_*.py
 build/
 dist/
 *.egg-info/
+
+# Cannon sweep / W&B artifacts
+wandb/
+sweep_*results.csv

@@ -1,0 +1,61 @@
+#!/bin/bash
+# ===========================================================================
+#  The Cannon hyper-parameter sweep -- main PBS job.
+#
+#  Runs scripts/sweep_cannon.py on a compute node (no outbound network), which
+#  writes one *offline* Weights & Biases run per grid point under ./wandb. When
+#  the sweep finishes it submits a second job to the `copyq` queue -- the NCI
+#  Gadi data-mover queue, which has internet access -- to `wandb sync` those
+#  offline runs to the cloud (see scripts/sync_wandb.pbs).
+#
+#  On non-Gadi PBS sites, point the sync job at whatever queue is allowed to
+#  reach the internet.
+#
+#  Submit with:   qsub scripts/sweep.pbs
+# ===========================================================================
+#PBS -N cannon-sweep
+#PBS -P REPLACE_WITH_PROJECT
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=64GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration ---------------------------------------------------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to the Python interpreter (conda/venv) that has thecannon +
+# wandb installed, e.g. /scratch/REPLACE_WITH_PROJECT/envs/thecannon/bin/python
+PYTHON_BIN="python"
+WANDB_PROJECT="cannon-sweep"
+# The command that runs the sweep. Replace `--demo` with your own driver: a
+# Python script that loads your spectra/labels and calls
+# scripts.sweep_cannon.sweep(...) with wandb_project=WANDB_PROJECT.
+SWEEP_CMD="${PYTHON_BIN} -m scripts.sweep_cannon --demo --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+# Keep W&B fully offline on the compute node; runs are uploaded later on copyq.
+export WANDB_MODE=offline
+export WANDB_DIR="${PROJECT_DIR}/wandb"
+mkdir -p "${WANDB_DIR}"
+
+echo "[$(date)] starting sweep on $(hostname)"
+${SWEEP_CMD}
+sweep_rc=$?
+echo "[$(date)] sweep finished with exit code ${sweep_rc}"
+
+# Spawn the copyq job to upload the offline runs (it has external network
+# access). Whatever offline runs exist are synced, even if the sweep partially
+# failed, so we submit regardless of sweep_rc.
+echo "[$(date)] submitting copyq sync job"
+sync_job=$(qsub \
+    -v "PROJECT_DIR=${PROJECT_DIR},PYTHON_BIN=${PYTHON_BIN},WANDB_DIR=${WANDB_DIR}" \
+    "${PROJECT_DIR}/scripts/sync_wandb.pbs")
+echo "[$(date)] submitted sync job: ${sync_job}"
+
+exit ${sweep_rc}
