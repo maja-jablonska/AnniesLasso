@@ -308,3 +308,44 @@ def test_proximal_matches_lbfgs_at_reg0(golden, vectorizer):
     theta, s2, _ = model.train(op_method="proximal")
     np.testing.assert_allclose(
         theta, golden["outputs"]["train_reg0"]["theta"], atol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+#  Closed-form fast path (regularization == 0)                                 #
+# --------------------------------------------------------------------------- #
+
+def test_closed_form_matches_lbfgs_with_censoring(golden, vectorizer):
+    """The closed-form fast path used at regularization=0 must reproduce the
+    iterative L-BFGS optimum, including when coefficients are censored."""
+    import jax
+    import jax.numpy as jnp
+    from thecannon import fitting
+
+    m = golden["meta"]
+    model = tc.CannonModel(m["labels"], m["flux"], m["ivar"], vectorizer,
+                           dispersion=m["dispersion"], regularization=0)
+    dm = jnp.asarray(model.design_matrix)
+    flux_PN = jnp.asarray(model.training_set_flux.T)
+    ivar_PN = jnp.asarray(model.training_set_ivar.T)
+    P, T = flux_PN.shape[0], dm.shape[1]
+
+    # Censor three (non-continuum) coefficients on every pixel.
+    rng = np.random.default_rng(1)
+    mask = np.ones((P, T), bool)
+    for p in range(P):
+        mask[p, rng.choice(np.arange(1, T), size=3, replace=False)] = False
+    mask = jnp.asarray(mask)
+
+    fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
+    init = jnp.broadcast_to(jnp.stack([fiducial, fiducial]), (P, 2, T))
+    reg = jnp.zeros(P)
+
+    cf = jax.vmap(fitting.make_pixel_closed_form(), in_axes=(0, 0, None, 0))
+    lb = jax.vmap(fitting.make_pixel_fitter(op_method="l_bfgs_b"),
+                  in_axes=(0, 0, 0, None, 0, 0))
+    theta_cf, _, _ = cf(flux_PN, ivar_PN, dm, mask)
+    theta_lb, _, _ = lb(flux_PN, ivar_PN, init, dm, reg, mask)
+
+    np.testing.assert_allclose(theta_cf, theta_lb, atol=1e-8)
+    # Censored coefficients are exactly zero.
+    assert bool(jnp.all(theta_cf[~np.asarray(mask)] == 0.0))

@@ -346,6 +346,57 @@ def make_pixel_fitter(op_method="l_bfgs_b", maxiter=_TRAIN_MAXITER,
     return fit
 
 
+def make_pixel_closed_form():
+    """
+    Build a pure, ``jax.vmap``-able function that fits a single pixel in closed
+    form. With no regularization and no box constraints the pixel objective is a
+    convex quadratic (weighted least squares), so its minimum is the
+    normal-equations solution and the iterative optimizer is unnecessary.
+
+    :returns:
+        A function ``fit(flux, ivar, design_matrix, column_mask)`` returning
+        ``(theta, s2, fopt)`` with the same conventions as the optimizer built
+        by :func:`make_pixel_fitter` (censored coefficients are exactly zero;
+        information-free pixels return the fiducial theta with infinite scatter).
+    """
+
+    def fit(flux, ivar, design_matrix, column_mask):
+
+        T = design_matrix.shape[1]
+        mask = column_mask.astype(design_matrix.dtype)
+
+        # No information in this pixel -> fiducial theta with infinite scatter.
+        no_info = jnp.sum(ivar) < ivar.size
+
+        # Zero out censored columns so they cannot contribute.
+        dm = design_matrix * mask[None, :]
+
+        # Normal equations A^T C A theta = A^T C y (with C = diag(ivar)). A
+        # censored column is zeroed, leaving a zero row/column in the Gram
+        # matrix; adding a unit diagonal there makes it non-singular and forces
+        # that coefficient to exactly zero without coupling to the active ones.
+        CiA = dm * ivar[:, None]
+        gram = jnp.dot(dm.T, CiA) + jnp.diag(1.0 - mask)
+        rhs = jnp.dot(dm.T, flux * ivar)
+        theta = jnp.linalg.solve(gram, rhs) * mask
+
+        fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
+        ok = jnp.all(jnp.isfinite(theta))
+        theta = jnp.where(ok, theta, fiducial)
+
+        residuals_squared = (flux - jnp.dot(theta, dm.T)) ** 2
+        s2 = _fit_scatter(residuals_squared, ivar)
+        fopt = _chi_sq_only(theta, dm, flux, ivar)
+
+        theta = jnp.where(no_info, fiducial, theta)
+        s2 = jnp.where(no_info, jnp.inf, s2)
+        fopt = jnp.where(no_info, jnp.nan, fopt)
+
+        return (theta, s2, fopt)
+
+    return fit
+
+
 def fit_pixel_fixed_scatter(flux, ivar, initial_thetas, design_matrix,
     regularization, censoring_mask, **kwargs):
     """

@@ -667,18 +667,6 @@ class CannonModel(object):
 
         fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
 
-        # Initial theta guesses for every pixel: a linear-algebra estimate and
-        # the fiducial value. The regularized objective is convex, so the
-        # optimum is independent of the starting point; these only set where the
-        # optimizer begins.
-        linalg_theta = jax.vmap(
-            lambda f, i: fitting.fit_theta_by_linalg(f, i, 0.0, design_matrix)[0]
-        )(flux_PN, ivar_PN)                                 # (P, T)
-        finite = jnp.all(jnp.isfinite(linalg_theta), axis=1, keepdims=True)
-        linalg_theta = jnp.where(finite, linalg_theta, fiducial[None, :])
-        init_stack = jnp.stack(
-            [linalg_theta, jnp.broadcast_to(fiducial, (P, T))], axis=1)  # (P,2,T)
-
         # Per-pixel column mask: True keeps the coefficient, False censors it.
         if self.censors and len(set(self.censors).intersection(
                 self.vectorizer.label_names)) > 0:
@@ -691,10 +679,48 @@ class CannonModel(object):
         reg = 0.0 if self.regularization is None else self.regularization
         reg_P = jnp.broadcast_to(jnp.asarray(reg, dtype=float), (P,))
 
-        fitter = fitting.make_pixel_fitter(
-            op_method=op_method, maxiter=maxiter, tol=tol, bounds=bounds)
-        batched = jax.jit(jax.vmap(
-            fitter, in_axes=(0, 0, 0, None, 0, 0)))
+        # With no regularization and no box constraints the pixel objective is a
+        # convex quadratic, so its minimum is the closed-form least-squares
+        # solution -- there is no need to run the iterative optimizer at all.
+        closed_form = bounds is None and (
+            self.regularization is None
+            or (np.ndim(self.regularization) == 0
+                and float(self.regularization) == 0.0))
+
+        if closed_form:
+            fitter = fitting.make_pixel_closed_form()
+            batched = jax.jit(jax.vmap(fitter, in_axes=(0, 0, None, 0)))
+
+            def run_batch(sl):
+                return batched(flux_PN[sl], ivar_PN[sl], design_matrix,
+                               column_mask[sl])
+        else:
+            # Initial theta guesses for every pixel: a linear-algebra estimate
+            # and the fiducial value. The regularized objective is convex, so
+            # the optimum is independent of the starting point; these only set
+            # where the optimizer begins. Computed in a single jitted (hence
+            # fused) call rather than op-by-op.
+            @jax.jit
+            def _initial_stack(flux_PN, ivar_PN):
+                linalg_theta = jax.vmap(
+                    lambda f, i: fitting.fit_theta_by_linalg(
+                        f, i, 0.0, design_matrix)[0])(flux_PN, ivar_PN)
+                finite = jnp.all(
+                    jnp.isfinite(linalg_theta), axis=1, keepdims=True)
+                linalg_theta = jnp.where(finite, linalg_theta, fiducial[None, :])
+                return jnp.stack(
+                    [linalg_theta, jnp.broadcast_to(fiducial, (P, T))], axis=1)
+
+            init_stack = _initial_stack(flux_PN, ivar_PN)        # (P, 2, T)
+
+            fitter = fitting.make_pixel_fitter(
+                op_method=op_method, maxiter=maxiter, tol=tol, bounds=bounds)
+            batched = jax.jit(jax.vmap(
+                fitter, in_axes=(0, 0, 0, None, 0, 0)))
+
+            def run_batch(sl):
+                return batched(flux_PN[sl], ivar_PN[sl], init_stack[sl],
+                               design_matrix, reg_P[sl], column_mask[sl])
 
         # Pixels are fit independently, so we run them in fixed-size batches
         # rather than one giant vmap. This lets us report progress (the single
@@ -714,10 +740,12 @@ class CannonModel(object):
             edge = lambda a: jnp.broadcast_to(a[-1:], (pad,) + a.shape[1:])
             flux_PN = jnp.concatenate([flux_PN, edge(flux_PN)], axis=0)
             ivar_PN = jnp.concatenate([ivar_PN, edge(ivar_PN)], axis=0)
-            init_stack = jnp.concatenate([init_stack, edge(init_stack)], axis=0)
-            reg_P = jnp.concatenate([reg_P, edge(reg_P)], axis=0)
             column_mask = jnp.concatenate([column_mask, edge(column_mask)],
                                           axis=0)
+            if not closed_form:
+                init_stack = jnp.concatenate([init_stack, edge(init_stack)],
+                                             axis=0)
+                reg_P = jnp.concatenate([reg_P, edge(reg_P)], axis=0)
 
         try:
             from tqdm import tqdm
@@ -731,16 +759,15 @@ class CannonModel(object):
         theta_batches, s2_batches, fopt_batches = [], [], []
         for b in range(n_batches):
             sl = slice(b * batch_size, (b + 1) * batch_size)
-            th, s2b, fob = batched(
-                flux_PN[sl], ivar_PN[sl], init_stack[sl], design_matrix,
-                reg_P[sl], column_mask[sl])
-            # Block on the device (keeping the results as JAX arrays) so the bar
-            # tracks real work rather than JAX's asynchronous dispatch.
-            jax.block_until_ready((th, s2b, fob))
+            th, s2b, fob = run_batch(sl)
             theta_batches.append(th)
             s2_batches.append(s2b)
             fopt_batches.append(fob)
             if pbar is not None:
+                # Block on the device so the bar tracks real work rather than
+                # JAX's asynchronous dispatch. With no bar we let the batches
+                # dispatch asynchronously and overlap.
+                jax.block_until_ready((th, s2b, fob))
                 pbar.update(min((b + 1) * batch_size, P) - b * batch_size)
 
         if pbar is not None:
