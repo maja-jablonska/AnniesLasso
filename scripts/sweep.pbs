@@ -31,10 +31,11 @@ PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 # wandb installed, e.g. /scratch/REPLACE_WITH_PROJECT/envs/thecannon/bin/python
 PYTHON_BIN="python"
 WANDB_PROJECT="cannon-sweep"
-# The command that runs the sweep. Replace `--demo` with your own driver: a
-# Python script that loads your spectra/labels and calls
-# scripts.sweep_cannon.sweep(...) with wandb_project=WANDB_PROJECT.
-SWEEP_CMD="${PYTHON_BIN} -m scripts.sweep_cannon --demo --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
+# The command that runs the sweep. scripts/run_sweep.py loads + normalizes the
+# spectra (defaults point at the bulge-ages-and-orbits data) and cross-validates
+# the grid. Override --spectra/--continuum-list/--labels/--orders/etc. as needed,
+# or pass --demo to dry-run on the bundled golden data.
+SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"
