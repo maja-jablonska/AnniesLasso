@@ -281,8 +281,10 @@ def test_write_read_roundtrip(trained_reg0, golden):
         trained_reg0.write(path, include_training_set_spectra=True,
                            overwrite=True)
         reloaded = tc.CannonModel.read(path)
-        # Trained attributes survive the round-trip as numpy arrays.
-        assert isinstance(reloaded.theta, np.ndarray)
+        # Trained attributes are JAX arrays and survive the round-trip as such.
+        import jax
+        assert isinstance(trained_reg0.theta, jax.Array)
+        assert isinstance(reloaded.theta, jax.Array)
         np.testing.assert_array_equal(reloaded.theta, trained_reg0.theta)
         np.testing.assert_array_equal(reloaded.s2, trained_reg0.s2)
         # Predictions are identical after reload.

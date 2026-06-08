@@ -594,7 +594,7 @@ class CannonModel(object):
 
 
     def train(self, threads=None, op_method=None, op_strict=True, op_kwds=None,
-        **kwargs):
+        progressbar=True, batch_size=None, **kwargs):
         """
         Train the model.
 
@@ -610,6 +610,17 @@ class CannonModel(object):
 
         :param op_kwds:
             Keyword arguments to provide directly to the optimization function.
+
+        :param progressbar: [optional]
+            Display a progress bar while pixels are being fit (requires
+            ``tqdm``; silently disabled if it is not installed).
+
+        :param batch_size: [optional]
+            The number of pixels to fit per vectorized batch. Pixels are fit
+            independently, so this does not change the result; it only controls
+            the granularity of the progress bar and bounds the peak memory and
+            compilation cost of the vmapped optimizer. Defaults to a value that
+            yields ~50 progress updates with reasonably large batches.
 
         :returns:
             A three-length tuple containing the spectral coefficients `theta`,
@@ -685,14 +696,65 @@ class CannonModel(object):
         batched = jax.jit(jax.vmap(
             fitter, in_axes=(0, 0, 0, None, 0, 0)))
 
-        theta, s2, fopt = batched(
-            flux_PN, ivar_PN, init_stack, design_matrix, reg_P, column_mask)
+        # Pixels are fit independently, so we run them in fixed-size batches
+        # rather than one giant vmap. This lets us report progress (the single
+        # fused call is opaque), bounds peak memory, and keeps the compiled
+        # program small enough to compile once and reuse for every batch.
+        if batch_size is None:
+            batch_size = max(512, int(np.ceil(P / 50)))
+        batch_size = int(min(max(1, batch_size), P))
 
-        theta = np.asarray(theta)
-        s2 = np.asarray(s2)
-        fopt = np.asarray(fopt)
+        # Pad the pixel axis up to a whole number of equally-sized batches so
+        # every call to `batched` has identical shapes and XLA compiles it only
+        # once. The padding pixels are duplicates of the last real pixel and are
+        # discarded below.
+        n_batches = int(np.ceil(P / batch_size))
+        pad = n_batches * batch_size - P
+        if pad:
+            edge = lambda a: jnp.broadcast_to(a[-1:], (pad,) + a.shape[1:])
+            flux_PN = jnp.concatenate([flux_PN, edge(flux_PN)], axis=0)
+            ivar_PN = jnp.concatenate([ivar_PN, edge(ivar_PN)], axis=0)
+            init_stack = jnp.concatenate([init_stack, edge(init_stack)], axis=0)
+            reg_P = jnp.concatenate([reg_P, edge(reg_P)], axis=0)
+            column_mask = jnp.concatenate([column_mask, edge(column_mask)],
+                                          axis=0)
 
-        meta = [dict(op_method=op_method, fopt=float(fopt[p]),
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None
+
+        pbar = None
+        if progressbar and tqdm is not None:
+            pbar = tqdm(total=P, desc="Training", unit="px")
+
+        theta_batches, s2_batches, fopt_batches = [], [], []
+        for b in range(n_batches):
+            sl = slice(b * batch_size, (b + 1) * batch_size)
+            th, s2b, fob = batched(
+                flux_PN[sl], ivar_PN[sl], init_stack[sl], design_matrix,
+                reg_P[sl], column_mask[sl])
+            # Block on the device (keeping the results as JAX arrays) so the bar
+            # tracks real work rather than JAX's asynchronous dispatch.
+            jax.block_until_ready((th, s2b, fob))
+            theta_batches.append(th)
+            s2_batches.append(s2b)
+            fopt_batches.append(fob)
+            if pbar is not None:
+                pbar.update(min((b + 1) * batch_size, P) - b * batch_size)
+
+        if pbar is not None:
+            pbar.close()
+
+        # Concatenate the batches and drop any padding pixels. The trained
+        # quantities are kept as JAX arrays end-to-end.
+        theta = jnp.concatenate(theta_batches, axis=0)[:P]
+        s2 = jnp.concatenate(s2_batches, axis=0)[:P]
+        fopt = jnp.concatenate(fopt_batches, axis=0)[:P]
+
+        # A single host transfer for the per-pixel metadata.
+        fopt_values = fopt.tolist()
+        meta = [dict(op_method=op_method, fopt=fopt_values[p],
                      maxiter=maxiter, tol=tol) for p in range(P)]
 
         self._theta, self._s2 = (theta, s2)
