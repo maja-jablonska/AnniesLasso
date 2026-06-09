@@ -397,6 +397,185 @@ def make_pixel_closed_form():
     return fit
 
 
+# --------------------------------------------------------------------------- #
+#  Errors-in-variables (uncertain labels) per-pixel fits                       #
+# --------------------------------------------------------------------------- #
+#
+#  The standard Cannon treats the training-set labels (the features that build
+#  the design matrix) as exact. When the labels carry uncertainty, propagate it
+#  to first order through the model: for star ``s`` and pixel coefficients
+#  ``theta``, the model prediction ``m = theta . v(x_s)`` has variance
+#
+#      Var(m_s) ~= (theta . J_v[s])^T Sigma_s (theta . J_v[s])
+#
+#  where ``J_v[s] = d v / d x`` is the vectorizer Jacobian at star ``s`` and
+#  ``Sigma_s`` is the (scaled) label covariance. With diagonal label errors this
+#  is ``sum_l (theta . J_v[s])_l^2 * var_label[s, l]``. The propagated variance
+#  is folded into the per-star weight exactly as the scatter term is, via
+#  ``ivar_eff = ivar / (1 + ivar * var_label)``. Because the weight then depends
+#  on ``theta``, the weighted least-squares solve is iterated to a fixed point
+#  (iteratively reweighted least squares); a handful of iterations suffices.
+
+
+def _label_variance_term(theta, label_jac, label_var):
+    """
+    First-order propagated model variance from diagonal label errors.
+
+    :param theta:
+        The pixel coefficients, shape ``(T,)``.
+
+    :param label_jac:
+        The vectorizer Jacobian ``d v / d x`` at every star, shape
+        ``(S, T, L)`` (in the scaled label space the design matrix uses).
+
+    :param label_var:
+        The per-star variance of the scaled labels, shape ``(S, L)``.
+
+    :returns:
+        The propagated model variance for every star, shape ``(S,)``.
+    """
+    g = jnp.einsum("t,stl->sl", theta, label_jac)   # d(theta . v)/dx per star
+    return jnp.sum(g * g * label_var, axis=1)
+
+
+def make_pixel_closed_form_eiv(label_jac, label_var, n_irls=5):
+    """
+    Closed-form per-pixel fit that accounts for diagonal label uncertainties via
+    iteratively reweighted least squares. Same conventions and return signature
+    as :func:`make_pixel_closed_form`; ``label_jac`` (S, T, L) and ``label_var``
+    (S, L) are shared across pixels and closed over.
+    """
+
+    def fit(flux, ivar, design_matrix, column_mask):
+
+        T = design_matrix.shape[1]
+        mask = column_mask.astype(design_matrix.dtype)
+        no_info = jnp.sum(ivar) < ivar.size
+        dm = design_matrix * mask[None, :]
+        fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
+
+        def solve(w):
+            # Weighted normal equations with per-star weights ``w``. The unit on
+            # the censored diagonal keeps the Gram matrix non-singular and pins
+            # those coefficients to exactly zero (see make_pixel_closed_form).
+            CiA = dm * w[:, None]
+            gram = jnp.dot(dm.T, CiA) + jnp.diag(1.0 - mask)
+            rhs = jnp.dot(dm.T, flux * w)
+            return jnp.linalg.solve(gram, rhs) * mask
+
+        def reweight(theta):
+            v_label = _label_variance_term(theta, label_jac, label_var)
+            return ivar / (1.0 + ivar * v_label)
+
+        def step(_, theta):
+            return solve(reweight(theta))
+
+        # Start from the exact-label solution, then reweight to a fixed point.
+        theta = lax.fori_loop(0, n_irls, step, solve(ivar))
+
+        ok = jnp.all(jnp.isfinite(theta))
+        theta = jnp.where(ok, theta, fiducial)
+
+        w = reweight(theta)
+        residuals_squared = (flux - jnp.dot(theta, dm.T)) ** 2
+        s2 = _fit_scatter(residuals_squared, w)
+        fopt = _chi_sq_only(theta, dm, flux, w)
+
+        theta = jnp.where(no_info, fiducial, theta)
+        s2 = jnp.where(no_info, jnp.inf, s2)
+        fopt = jnp.where(no_info, jnp.nan, fopt)
+
+        return (theta, s2, fopt)
+
+    return fit
+
+
+def make_pixel_fitter_eiv(label_jac, label_var, n_irls=5, op_method="l_bfgs_b",
+    maxiter=_TRAIN_MAXITER, tol=_TRAIN_TOL, bounds=None):
+    """
+    Regularized/bounded per-pixel fit that accounts for diagonal label
+    uncertainties. Same conventions and return signature as the optimizer built
+    by :func:`make_pixel_fitter`, wrapped in an outer iteratively-reweighted
+    loop: each iteration fixes the per-star weights from the current ``theta``
+    and re-solves the (regularized) weighted problem. ``label_jac`` (S, T, L)
+    and ``label_var`` (S, L) are shared across pixels and closed over.
+    """
+
+    op_method = (op_method or "l_bfgs_b").lower()
+    if op_method == "powell":
+        op_method = "l_bfgs_b"
+    if op_method not in ("l_bfgs_b", "proximal"):
+        raise ValueError("unknown optimization method '{}' -- 'l_bfgs_b' or "
+                         "'proximal' are available".format(op_method))
+    if bounds is not None:
+        lower, upper = (jnp.asarray(bounds[0]), jnp.asarray(bounds[1]))
+
+    def fit(flux, ivar, init_stack, design_matrix, regularization, column_mask):
+
+        T = design_matrix.shape[1]
+        mask = column_mask.astype(design_matrix.dtype)
+        no_info = jnp.sum(ivar) < ivar.size
+        dm = design_matrix * mask[None, :]
+        fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
+
+        def objective(theta, w):
+            return _chi_sq_only(theta, dm, flux, w) \
+                + regularization * jnp.sum(jnp.abs(theta[1:]))
+
+        # Weighted solve, warm-started from ``start``, with per-star weights ``w``.
+        if bounds is not None:
+            lower_eff = jnp.where(column_mask, lower, -jnp.inf)
+            upper_eff = jnp.where(column_mask, upper, jnp.inf)
+
+            def solve(start, w):
+                s = jnp.clip(start, lower_eff, upper_eff)
+                solver = LBFGSB(fun=lambda th: objective(th, w),
+                                maxiter=maxiter, tol=tol)
+                return solver.run(s, bounds=(lower_eff, upper_eff)).params
+        elif op_method == "proximal":
+            def solve(start, w):
+                l1reg = jnp.full((T,), regularization).at[0].set(0.0) * mask
+                solver = ProximalGradient(
+                    fun=lambda th: _chi_sq_only(th, dm, flux, w),
+                    prox=prox_lasso, maxiter=maxiter, tol=tol)
+                return solver.run(start, l1reg).params
+        else:
+            def solve(start, w):
+                solver = LBFGS(fun=lambda th: objective(th, w),
+                               maxiter=maxiter, tol=tol)
+                return solver.run(start).params
+
+        def reweight(theta):
+            v_label = _label_variance_term(theta, label_jac, label_var)
+            return ivar / (1.0 + ivar * v_label)
+
+        # Choose the best starting point against the raw-ivar objective.
+        feval = jax.vmap(lambda th: objective(th, ivar))(init_stack)
+        feval = jnp.where(jnp.isnan(feval), jnp.inf, feval)
+        best_init = init_stack[jnp.argmin(feval)]
+
+        # First solve with raw weights, then reweight to a fixed point.
+        theta0 = solve(best_init, ivar)
+
+        def step(_, theta):
+            return solve(theta, reweight(theta))
+
+        theta = lax.fori_loop(0, n_irls, step, theta0) * mask
+
+        w = reweight(theta)
+        residuals_squared = (flux - jnp.dot(theta, dm.T)) ** 2
+        s2 = _fit_scatter(residuals_squared, w)
+        fopt = objective(theta, w)
+
+        theta = jnp.where(no_info, fiducial, theta)
+        s2 = jnp.where(no_info, jnp.inf, s2)
+        fopt = jnp.where(no_info, jnp.nan, fopt)
+
+        return (theta, s2, fopt)
+
+    return fit
+
+
 def fit_pixel_fixed_scatter(flux, ivar, initial_thetas, design_matrix,
     regularization, censoring_mask, **kwargs):
     """

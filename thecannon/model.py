@@ -30,6 +30,16 @@ from . import (censoring, fitting, utils, vectorizer as vectorizer_module, __ver
 logger = logging.getLogger(__name__)
 
 
+# Target memory budget (bytes) for the per-batch working set when ``train`` is
+# left to pick its own ``batch_size``. The default batch size is shrunk so that
+# the order-sensitive per-pixel temporaries (the ``(N, T)`` design-matrix
+# products and the ``(T, T)`` Gram/Hessian) stay within roughly this budget,
+# which keeps higher polynomial orders from becoming memory-hungry without the
+# caller having to hand-tune ``batch_size``. Override on the class/module if a
+# machine has more or less headroom.
+_TRAIN_BATCH_MEM_BYTES = 1 << 30  # 1 GiB
+
+
 def requires_training(method):
     """
     A decorator for model methods that require training before being run.
@@ -82,7 +92,8 @@ class CannonModel(object):
     """
 
     _data_attributes = \
-        ("training_set_labels", "training_set_flux", "training_set_ivar")
+        ("training_set_labels", "training_set_flux", "training_set_ivar",
+         "training_set_label_err")
 
     # Descriptive attributes are needed to train *and* test the model.
     _descriptive_attributes = \
@@ -92,7 +103,8 @@ class CannonModel(object):
     _trained_attributes = ("theta", "s2")
     
     def __init__(self, training_set_labels, training_set_flux, training_set_ivar,
-        vectorizer, dispersion=None, regularization=None, censors=None, **kwargs):
+        vectorizer, dispersion=None, regularization=None, censors=None,
+        training_set_label_err=None, **kwargs):
 
         # Save the vectorizer.
         if not isinstance(vectorizer, BaseVectorizer):
@@ -124,6 +136,26 @@ class CannonModel(object):
             
             # Check that the flux and ivar are valid.
             self._verify_training_data(**kwargs)
+
+        # Optional 1-sigma uncertainties on the training-set labels (the
+        # "feature" uncertainties). Stored in the same (num_stars, num_labels)
+        # layout as the resolved label array; ``None`` recovers the standard
+        # exact-label Cannon. Used by ``train`` to propagate label errors into
+        # the per-pixel weights (errors-in-variables).
+        if training_set_label_err is None or self._training_set_labels is None:
+            self._training_set_label_err = None
+        else:
+            label_err = np.atleast_2d(
+                np.asarray(training_set_label_err, dtype=float))
+            if label_err.shape != self._training_set_labels.shape:
+                raise ValueError(
+                    "training_set_label_err shape {0} does not match the "
+                    "training set labels shape {1}".format(
+                        label_err.shape, self._training_set_labels.shape))
+            if not np.all(np.isfinite(label_err)) or np.any(label_err < 0):
+                raise ValueError(
+                    "training_set_label_err must be finite and non-negative")
+            self._training_set_label_err = label_err
 
         # Set regularization, censoring, dispersion.
         self.regularization = regularization
@@ -184,6 +216,12 @@ class CannonModel(object):
     def training_set_ivar(self):
         """ Return the inverse variances of the training set fluxes. """
         return self._training_set_ivar
+
+
+    @property
+    def training_set_label_err(self):
+        """ Return the 1-sigma uncertainties on the training set labels. """
+        return self._training_set_label_err
 
 
     @property
@@ -595,7 +633,7 @@ class CannonModel(object):
 
 
     def train(self, threads=None, op_method=None, op_strict=True, op_kwds=None,
-        progressbar=True, batch_size=None, **kwargs):
+        progressbar=True, batch_size=None, n_irls=5, **kwargs):
         """
         Train the model.
 
@@ -622,6 +660,13 @@ class CannonModel(object):
             the granularity of the progress bar and bounds the peak memory and
             compilation cost of the vmapped optimizer. Defaults to a value that
             yields ~50 progress updates with reasonably large batches.
+
+        :param n_irls: [optional]
+            The number of iteratively-reweighted least-squares iterations used
+            when the model carries label uncertainties
+            (``training_set_label_err``). Each iteration refines the per-star
+            weights from the propagated label variance. Ignored when no label
+            uncertainties are set.
 
         :returns:
             A three-length tuple containing the spectral coefficients `theta`,
@@ -688,8 +733,32 @@ class CannonModel(object):
             or (np.ndim(self.regularization) == 0
                 and float(self.regularization) == 0.0))
 
+        # Optional errors-in-variables: when the training labels carry
+        # uncertainties, propagate them into the per-pixel weights. The label
+        # Jacobian d v / d x and the (scaled) label variances depend only on the
+        # labels -- not on the pixel -- so they are computed once and shared
+        # across all pixels (closed over by the fitter, not vmapped).
+        eiv = self.training_set_label_err is not None
+        if eiv:
+            scaled_labels = jnp.asarray(
+                (np.asarray(self.training_set_labels, dtype=float)
+                 - self._fiducials) / self._scales)               # (S, L)
+            # d(design-matrix row)/d(scaled label) at every star: (S, T, L).
+            label_jac = jax.vmap(
+                self.vectorizer.get_label_vector_derivative)(scaled_labels)
+            # Variance of the scaled labels (sigma in scaled space = sigma/scale).
+            label_var = jnp.asarray(
+                (np.asarray(self.training_set_label_err, dtype=float)
+                 / self._scales) ** 2)                            # (S, L)
+            logger.info("Propagating label uncertainties via {0} IRLS "
+                        "iteration(s)".format(n_irls))
+
         if closed_form:
-            fitter = fitting.make_pixel_closed_form()
+            if eiv:
+                fitter = fitting.make_pixel_closed_form_eiv(
+                    label_jac, label_var, n_irls=n_irls)
+            else:
+                fitter = fitting.make_pixel_closed_form()
         else:
             # Initial theta guesses for every pixel: a linear-algebra estimate
             # and the fiducial value. The regularized objective is convex, so
@@ -709,15 +778,41 @@ class CannonModel(object):
 
             init_stack = _initial_stack(flux_PN, ivar_PN)        # (P, 2, T)
 
-            fitter = fitting.make_pixel_fitter(
-                op_method=op_method, maxiter=maxiter, tol=tol, bounds=bounds)
+            if eiv:
+                fitter = fitting.make_pixel_fitter_eiv(
+                    label_jac, label_var, n_irls=n_irls, op_method=op_method,
+                    maxiter=maxiter, tol=tol, bounds=bounds)
+            else:
+                fitter = fitting.make_pixel_fitter(
+                    op_method=op_method, maxiter=maxiter, tol=tol, bounds=bounds)
 
         # Pixels are fit independently, so we run them in fixed-size batches
         # (vmap within a batch, lax.scan across batches) rather than one giant
         # vmap. The scan drives a per-batch jax-tqdm progress bar, bounds peak
         # memory, and keeps the compiled body small (compiled once, reused).
         if batch_size is None:
+            # Granularity default: ~50 progress updates with reasonably large
+            # batches.
             batch_size = max(512, int(np.ceil(P / 50)))
+            # ...but cap it so the order-sensitive per-pixel temporaries fit the
+            # memory budget. Under the vmap each pixel allocates roughly the
+            # (N, T) design-matrix products and the (T, T) Gram/Hessian, so the
+            # per-batch working set scales as batch_size * (N*T + T**2). Both N*T
+            # and T**2 grow with the polynomial order (via T), so this is what
+            # makes higher orders shrink the batch automatically.
+            per_pixel_bytes = 8 * (2 * S * T + 2 * T * T)
+            if eiv:
+                # Each pixel also forms the (S, L) label-gradient term per IRLS
+                # pass; account for it so label errors at high order still fit.
+                Ln = self.training_set_labels.shape[1]
+                per_pixel_bytes += 8 * (S * Ln + S * T)
+            cap = max(1, int(_TRAIN_BATCH_MEM_BYTES // per_pixel_bytes))
+            if cap < batch_size:
+                logger.info("Capping batch_size {0} -> {1} to keep the per-batch "
+                            "working set within ~{2:.0f} MiB (N={3}, T={4})"\
+                    .format(batch_size, cap, _TRAIN_BATCH_MEM_BYTES / (1 << 20),
+                            S, T))
+                batch_size = cap
         batch_size = int(min(max(1, batch_size), P))
 
         # Pad the pixel axis up to a whole number of equally-sized batches so
