@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 # machine has more or less headroom.
 _TRAIN_BATCH_MEM_BYTES = 1 << 30  # 1 GiB
 
+# Same idea for the test step: the per-star working set is dominated by the
+# (P, L) residual Jacobian and the (P, T) design products the Levenberg-Marquardt
+# solve forms under the vmap, so the default test batch size is shrunk to keep
+# batch_size * per_star within roughly this budget. Kept conservative because
+# the LM workspace holds several such copies and the compiled scan body also
+# drives a device-side CUDA graph whose size grows with the batch.
+_TEST_BATCH_MEM_BYTES = 1 << 29  # 512 MiB
+
 
 def requires_training(method):
     """
@@ -980,7 +988,22 @@ class CannonModel(object):
         # progress bar. Stars are fit independently (vmap within each batch);
         # the batching is only loop granularity and does not change results.
         if batch_size is None:
+            # Granularity default: ~50 progress updates.
             batch_size = max(1, int(np.ceil(S / 50)))
+            # ...but cap it to the memory budget. Each star forms ~ (P, L)
+            # residual Jacobians and (P, T) design products under the vmap, and
+            # the LM solve holds several such copies, so bound
+            # batch_size * per_star. This shrinks the batch automatically for
+            # models with many pixels / labels instead of OOMing the device.
+            T = self.design_matrix.shape[1]
+            per_star_bytes = 8 * P * (L + T + 8)
+            cap = max(1, int(_TEST_BATCH_MEM_BYTES // per_star_bytes))
+            if cap < batch_size:
+                logger.info("Capping test batch_size %d -> %d to keep the "
+                            "per-batch working set within ~%.0f MiB "
+                            "(P=%d, L=%d, T=%d)", batch_size, cap,
+                            _TEST_BATCH_MEM_BYTES / (1 << 20), P, L, T)
+                batch_size = cap
         batch_size = int(min(max(1, batch_size), S))
         n_batches = int(np.ceil(S / batch_size))
 
@@ -1002,7 +1025,11 @@ class CannonModel(object):
 
         def fit_batch(carry, x):
             _i, fb, ib, lb = x
-            return carry, spectra(fb, ib, lb)
+            op_labels, cov, chi_sq, _model_flux, n_use = spectra(fb, ib, lb)
+            # Drop the per-star model flux (P,): ``test`` does not return it, so
+            # accumulating it across the scan would waste device memory of order
+            # the whole validation set (S, P) for nothing.
+            return carry, (op_labels, cov, chi_sq, n_use)
 
         if progressbar:
             fit_batch = scan_tqdm(n_batches, desc="Testing")(fit_batch)
@@ -1014,7 +1041,7 @@ class CannonModel(object):
 
         xs = (jnp.arange(n_batches), reshape_batches(flux_j),
               reshape_batches(ivar_j), reshape_batches(init_j))
-        op_labels, cov, chi_sq, model_flux, n_use = run_test_scan(xs)
+        op_labels, cov, chi_sq, n_use = run_test_scan(xs)
 
         # Flatten the batch axis back onto the star axis and drop padding.
         unbatch = lambda a: a.reshape((n_batches * batch_size,) + a.shape[2:])[:S]
