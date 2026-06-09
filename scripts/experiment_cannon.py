@@ -200,7 +200,7 @@ def spectra_figure(dispersion, flux, ivar, recovered_flux, reference_flux,
 
 def run_one(table, dispersion, norm_flux, norm_ivar, label_names, order, reg,
     base_mask, train_frac, validate_frac, seed, output_dir, tag,
-    n_plot=3, wmin=None, wmax=None, label_err=None):
+    n_plot=3, wmin=None, wmax=None, label_err=None, test_batch_size=None):
     """
     Train + validate one (filter, cutoff, label_set, order, reg) combination,
     then reconstruct the validation spectra and write the spread + reconstruction
@@ -239,7 +239,8 @@ def run_one(table, dispersion, norm_flux, norm_ivar, label_names, order, reg,
     val_flux = sub_flux[validate_set]
     val_ivar = sub_ivar[validate_set]
     truth = sub_labels[validate_set]
-    recovered, _, meta = model.test(val_flux, val_ivar, progressbar=False)
+    recovered, _, meta = model.test(val_flux, val_ivar, progressbar=False,
+                                     batch_size=test_batch_size)
     recovered = np.asarray(recovered)
     test_r_chi_sq = np.array([m["r_chi_sq"] for m in meta], dtype=float)
 
@@ -321,7 +322,7 @@ def run_one(table, dispersion, norm_flux, norm_ivar, label_names, order, reg,
 def experiment(table, dispersion, norm_flux, norm_ivar, label_sets, orders,
     regularizations, snr_cutoffs=(None,), filters=(None,), snr_column="snr",
     train_frac=0.1, validate_frac=0.1, seed=888, output_dir=".",
-    n_plot=3, wmin=None, wmax=None, label_err=None):
+    n_plot=3, wmin=None, wmax=None, label_err=None, test_batch_size=None):
     """
     Loop the full (filter x snr_cutoff x label_set x order x reg) grid, calling
     :func:`run_one` for each, and collect a tidy results table. Failures are
@@ -353,7 +354,8 @@ def experiment(table, dispersion, norm_flux, norm_ivar, label_sets, orders,
                                 list(label_set), order, reg, base_mask,
                                 train_frac, validate_frac, seed, output_dir, tag,
                                 n_plot=n_plot, wmin=wmin, wmax=wmax,
-                                label_err=label_err)
+                                label_err=label_err,
+                                test_batch_size=test_batch_size)
                             row.update(meta)
                             row["status"] = "ok"
                         except Exception as exc:           # keep the grid alive
@@ -508,6 +510,9 @@ def main():
     parser.add_argument("--train-frac", type=float, default=0.1)
     parser.add_argument("--validate-frac", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=888)
+    parser.add_argument("--test-batch-size", type=int, default=None,
+                        help="spectra fit per batch in the test step; lower it "
+                             "if the device OOMs (default: memory-aware auto)")
     parser.add_argument("--n-plot", type=int, default=3,
                         help="number of example reconstructed spectra to plot")
     parser.add_argument("--plot-wmin", type=float, default=None,
@@ -553,7 +558,8 @@ def main():
         filters=filters, snr_column=args.snr_column,
         train_frac=args.train_frac, validate_frac=args.validate_frac,
         seed=args.seed, output_dir=args.output_dir, n_plot=args.n_plot,
-        wmin=args.plot_wmin, wmax=args.plot_wmax, label_err=label_err)
+        wmin=args.plot_wmin, wmax=args.plot_wmax, label_err=label_err,
+        test_batch_size=args.test_batch_size)
 
 
 if __name__ == "__main__":

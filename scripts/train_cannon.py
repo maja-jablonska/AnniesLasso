@@ -180,7 +180,7 @@ def one_to_one_figure(truth, predicted, label_names, title=None):
 
 def run(labels, normalized_flux, normalized_ivar, dispersion, label_names,
     order=2, regularization=0, train_frac=0.1, validate_frac=0.1, seed=888,
-    output_dir=".", save_model=None):
+    output_dir=".", save_model=None, test_batch_size=None):
     """
     Train on the training split, test on the validation split, and write the
     one-to-one figure + predictions CSV. ``labels`` is anything CannonModel
@@ -211,7 +211,8 @@ def run(labels, normalized_flux, normalized_ivar, dispersion, label_names,
                 np.asarray(model.theta).shape)
 
     predicted, _, _ = model.test(
-        normalized_flux[validate_set], normalized_ivar[validate_set])
+        normalized_flux[validate_set], normalized_ivar[validate_set],
+        batch_size=test_batch_size)
     predicted = np.asarray(predicted)
     truth = label_array[validate_set]
 
@@ -257,7 +258,8 @@ def _run_real(args):
         spectra, normalized_flux, normalized_ivar, dispersion, args.labels,
         order=args.order, regularization=args.regularization,
         train_frac=args.train_frac, validate_frac=args.validate_frac,
-        seed=args.seed, output_dir=args.output_dir, save_model=args.save_model)
+        seed=args.seed, output_dir=args.output_dir, save_model=args.save_model,
+        test_batch_size=args.test_batch_size)
 
 
 def _run_demo(args):
@@ -281,7 +283,8 @@ def _run_demo(args):
         labels, meta["flux"], meta["ivar"], meta["dispersion"], names,
         order=args.order, regularization=args.regularization,
         train_frac=0.5, validate_frac=0.5, seed=args.seed,
-        output_dir=args.output_dir, save_model=args.save_model)
+        output_dir=args.output_dir, save_model=args.save_model,
+        test_batch_size=args.test_batch_size)
 
 
 def main():
@@ -311,6 +314,9 @@ def main():
                         help="directory for the figure and predictions CSV")
     parser.add_argument("--save-model", default=None,
                         help="optional path to write the trained .model file")
+    parser.add_argument("--test-batch-size", type=int, default=None,
+                        help="spectra fit per batch in the test step; lower it "
+                             "if the device OOMs (default: memory-aware auto)")
     parser.add_argument("--demo", action="store_true",
                         help="run on the bundled golden data instead")
     parser.add_argument("-v", "--verbose", action="store_true",

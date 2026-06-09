@@ -45,7 +45,7 @@ _TRAIN_BATCH_MEM_BYTES = 1 << 30  # 1 GiB
 # batch_size * per_star within roughly this budget. Kept conservative because
 # the LM workspace holds several such copies and the compiled scan body also
 # drives a device-side CUDA graph whose size grows with the batch.
-_TEST_BATCH_MEM_BYTES = 1 << 29  # 512 MiB
+_TEST_BATCH_MEM_BYTES = 1 << 28  # 256 MiB
 
 
 def requires_training(method):
