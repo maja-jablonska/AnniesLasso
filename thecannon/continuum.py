@@ -12,7 +12,54 @@ __all__ = ["normalize", "sines_and_cosines"]
 
 import logging
 import numpy as np
+import jax
 import jax.numpy as jnp
+
+
+@jax.jit
+def _continuum_amplitudes(continuum_flux, continuum_ivar, M, region_matrix,
+    scalar):
+    """
+    Solve the (eigenvalue-regularized) weighted normal equations for the sine-
+    and-cosine amplitudes and evaluate the continuum, vectorized over stars.
+
+    All stars in a region share the same design matrices ``M`` (at the continuum
+    pixels) and ``region_matrix`` (at every region pixel), so the per-star solve
+    is mapped with ``jax.vmap`` and the whole thing JIT-compiled. JIT recompiles
+    once per distinct design-matrix shape (i.e. once per region).
+
+    :param continuum_flux:
+        Continuum-pixel fluxes, shape ``(n_stars, n_continuum_pixels)``.
+
+    :param continuum_ivar:
+        Inverse variances matching ``continuum_flux``.
+
+    :param M:
+        Continuum-pixel design matrix, shape ``(n_terms, n_continuum_pixels)``.
+
+    :param region_matrix:
+        Region design matrix, shape ``(n_terms, n_region_pixels)``.
+
+    :param scalar:
+        The magic eigenvalue-regularization scalar.
+
+    :returns:
+        A tuple of (continuum over the region pixels, amplitudes, condition
+        number), each with a leading ``n_stars`` axis.
+    """
+    def _one(cfl, civ):
+        MTM = jnp.dot(M, civ[:, None] * M.T)
+        MTy = jnp.dot(M, civ * cfl)
+
+        eigenvalues = jnp.linalg.eigvalsh(MTM)
+        MTM = MTM + jnp.eye(MTM.shape[0]) * (scalar * jnp.max(eigenvalues))
+        eigenvalues = jnp.linalg.eigvalsh(MTM)
+        condition_number = jnp.max(eigenvalues) / jnp.min(eigenvalues)
+
+        amplitudes = jnp.linalg.solve(MTM, MTy)
+        return jnp.dot(region_matrix.T, amplitudes), amplitudes, condition_number
+
+    return jax.vmap(_one)(continuum_flux, continuum_ivar)
 
 
 def _continuum_design_matrix(dispersion, L, order):
@@ -40,8 +87,8 @@ def _continuum_design_matrix(dispersion, L, order):
         ])
 
 
-def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3, 
-    regions=None, fill_value=1.0, **kwargs):
+def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
+    regions=None, fill_value=1.0, progressbar=True, **kwargs):
     """
     Fit the flux values of pre-defined continuum pixels using a sum of sine and
     cosine functions.
@@ -121,69 +168,62 @@ def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
     # Check for non-zero pixels (e.g. ivar > 0) that are not included in a
     # region. We should warn about this very loudly!
     warn_on_pixels = (pixel_included_in_regions == 0) * (ivar > 0)
+    if np.any(warn_on_pixels):
+        n_affected = int(np.any(warn_on_pixels, axis=1).sum())
+        logging.warn("Some pixels have measured flux values (e.g., ivar > 0) "
+                     "but are not included in any specified continuum region. "
+                     "These pixels won't be continuum-normalised ({0} spectra "
+                     "affected).".format(n_affected))
 
-    metadata = []
+    S = flux.shape[0]
     continuum = np.ones_like(flux) * fill_value
-    for i in range(flux.shape[0]):
+    metadata = [[] for _ in range(S)]
 
-        warn_indices = np.where(warn_on_pixels[i])[0]
-        if any(warn_indices):
-            # Split by deltas so that we give useful warning messages.
-            segment_indices = np.where(np.diff(warn_indices) > 1)[0]
-            segment_indices = np.sort(np.hstack(
-                [0, segment_indices, segment_indices + 1, len(warn_indices)]))
-            segment_indices = segment_indices.reshape(-1, 2)
+    # Each region is fit for every star at once: the design matrices are shared
+    # across stars, so the per-star normal-equation solve is vmapped and JIT-
+    # compiled (see `_continuum_amplitudes`). The host loop below only walks the
+    # handful of regions, so a plain tqdm bar over regions is the right tool --
+    # the jax-tqdm bars used in CannonModel.train/test only work inside JAX
+    # loops, and here there is no per-star Python loop left to track.
+    regions_iter = list(
+        zip(region_masks, region_matrices, continuum_masks, continuum_matrices))
+    if progressbar:
+        try:
+            from tqdm.auto import tqdm
+            regions_iter = tqdm(regions_iter, desc="Normalizing", unit="region")
+        except ImportError:
+            pass
 
-            segments = ", ".join(["{:.1f} to {:.1f} ({:d} pixels)".format(
-                dispersion[s], dispersion[e], e-s) for s, e in segment_indices])
+    for region_mask, region_matrix, continuum_mask, continuum_matrix \
+    in regions_iter:
+        if continuum_mask.size == 0:
+            # No continuum pixels in this region; leave it at the fill value.
+            for s in range(S):
+                metadata[s].append([order, L, fill_value, scalar, [], None])
+            continue
 
-            logging.warn("Some pixels in spectrum index {0} have measured flux "
-                         "values (e.g., ivar > 0) but are not included in any "
-                         "specified continuum region. These pixels won't be "
-                         "continuum-normalised: {1}".format(i, segments))
-            
-        # Get the flux and inverse variance for this object.
-        object_metadata = []
-        object_flux, object_ivar = (flux[i], ivar[i])
+        # Solve for the amplitudes (linear algebra performed in JAX, vmapped
+        # over all stars and JIT-compiled).
+        region_continuum, amplitudes, condition_number = _continuum_amplitudes(
+            jnp.asarray(flux[:, continuum_mask]),
+            jnp.asarray(ivar[:, continuum_mask]),
+            jnp.asarray(continuum_matrix),
+            jnp.asarray(region_matrix),
+            float(scalar))
 
-        # Normalize each region.
-        for region_mask, region_matrix, continuum_mask, continuum_matrix in \
-        zip(region_masks, region_matrices, continuum_masks, continuum_matrices):
-            if continuum_mask.size == 0:
-                # Skipping..
-                object_metadata.append([order, L, fill_value, scalar, [], None])
-                continue
+        continuum[:, region_mask] = np.asarray(region_continuum)
 
-            # We will fit to continuum pixels only.   
-            continuum_disp = dispersion[continuum_mask] 
-            continuum_flux, continuum_ivar \
-                = (object_flux[continuum_mask], object_ivar[continuum_mask])
+        amplitudes = np.asarray(amplitudes)
+        condition_number = np.asarray(condition_number)
+        for s in range(S):
+            metadata[s].append((order, L, fill_value, scalar,
+                                amplitudes[s], float(condition_number[s])))
 
-            # Solve for the amplitudes (linear algebra performed in JAX).
-            M = jnp.asarray(continuum_matrix)
-            civ = jnp.asarray(continuum_ivar)
-            cfl = jnp.asarray(continuum_flux)
-            MTM = jnp.dot(M, civ[:, None] * M.T)
-            MTy = jnp.dot(M, civ * cfl)
-
-            eigenvalues = jnp.linalg.eigvalsh(MTM)
-            MTM = MTM + jnp.eye(MTM.shape[0]) * (scalar * jnp.max(eigenvalues))
-            eigenvalues = jnp.linalg.eigvalsh(MTM)
-            condition_number = float(jnp.max(eigenvalues) / jnp.min(eigenvalues))
-
-            amplitudes = np.asarray(jnp.linalg.solve(MTM, MTy))
-            continuum[i, region_mask] = np.asarray(
-                jnp.dot(jnp.asarray(region_matrix).T, jnp.asarray(amplitudes)))
-            object_metadata.append(
-                (order, L, fill_value, scalar, amplitudes, condition_number))
-
-        metadata.append(object_metadata)
-
-    return (continuum, metadata) 
+    return (continuum, metadata)
     
 
-def normalize(dispersion, flux, ivar, continuum_pixels, L=1400, order=3, 
-    regions=None, fill_value=1.0, **kwargs):
+def normalize(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
+    regions=None, fill_value=1.0, progressbar=True, **kwargs):
     """
     Pseudo-continuum-normalize the flux using a defined set of continuum pixels
     and a sum of sine and cosine functions.
@@ -229,17 +269,17 @@ def normalize(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
         The continuum values for all pixels, and a dictionary that contains 
         metadata about the fit.
     """
-    continuum, metadata = sines_and_cosines(dispersion, flux, ivar, 
+    continuum, metadata = sines_and_cosines(dispersion, flux, ivar,
         continuum_pixels, L=L, order=order, regions=regions,
-        fill_value=fill_value, **kwargs)
+        fill_value=fill_value, progressbar=progressbar, **kwargs)
 
     normalized_flux = flux/continuum
     normalized_ivar = continuum * ivar * continuum
-    normalized_flux[normalized_ivar == 0] = 1.0
-    
-    non_finite_pixels = ~np.isfinite(normalized_flux)
-    normalized_flux[non_finite_pixels] = 1.0
-    normalized_ivar[non_finite_pixels] = 0.0
+    normalized_flux = jnp.where(normalized_ivar == 0, 1.0, normalized_flux)
+
+    non_finite_pixels = ~jnp.isfinite(normalized_flux)
+    normalized_flux = jnp.where(non_finite_pixels, 1.0, normalized_flux)
+    normalized_ivar = jnp.where(non_finite_pixels, 0.0, normalized_ivar)
 
     return (normalized_flux, normalized_ivar, continuum, metadata)
 

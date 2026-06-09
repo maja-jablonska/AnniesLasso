@@ -42,7 +42,8 @@ setup(
     ],
     keywords="The Cannon",
     packages=find_packages(exclude=["documents", "tests"]),
-    install_requires=["numpy", "scipy", "six", "jax", "jaxlib", "jaxopt"],
+    install_requires=["numpy", "scipy", "six", "jax", "jaxlib", "jaxopt",
+                      "jax-tqdm", "tqdm"],
     extras_require={
         "test": ["coverage", "pytest"]
     },
