@@ -21,6 +21,7 @@ from datetime import datetime
 from functools import wraps
 from sys import version_info
 from scipy.spatial import Delaunay
+from jax_tqdm import scan_tqdm
 
 from .vectorizer.base import BaseVectorizer
 from . import (censoring, fitting, utils, vectorizer as vectorizer_module, __version__)
@@ -689,11 +690,6 @@ class CannonModel(object):
 
         if closed_form:
             fitter = fitting.make_pixel_closed_form()
-            batched = jax.jit(jax.vmap(fitter, in_axes=(0, 0, None, 0)))
-
-            def run_batch(sl):
-                return batched(flux_PN[sl], ivar_PN[sl], design_matrix,
-                               column_mask[sl])
         else:
             # Initial theta guesses for every pixel: a linear-algebra estimate
             # and the fiducial value. The regularized objective is convex, so
@@ -715,23 +711,17 @@ class CannonModel(object):
 
             fitter = fitting.make_pixel_fitter(
                 op_method=op_method, maxiter=maxiter, tol=tol, bounds=bounds)
-            batched = jax.jit(jax.vmap(
-                fitter, in_axes=(0, 0, 0, None, 0, 0)))
-
-            def run_batch(sl):
-                return batched(flux_PN[sl], ivar_PN[sl], init_stack[sl],
-                               design_matrix, reg_P[sl], column_mask[sl])
 
         # Pixels are fit independently, so we run them in fixed-size batches
-        # rather than one giant vmap. This lets us report progress (the single
-        # fused call is opaque), bounds peak memory, and keeps the compiled
-        # program small enough to compile once and reuse for every batch.
+        # (vmap within a batch, lax.scan across batches) rather than one giant
+        # vmap. The scan drives a per-batch jax-tqdm progress bar, bounds peak
+        # memory, and keeps the compiled body small (compiled once, reused).
         if batch_size is None:
             batch_size = max(512, int(np.ceil(P / 50)))
         batch_size = int(min(max(1, batch_size), P))
 
         # Pad the pixel axis up to a whole number of equally-sized batches so
-        # every call to `batched` has identical shapes and XLA compiles it only
+        # every scan step has identical shapes and XLA compiles the body only
         # once. The padding pixels are duplicates of the last real pixel and are
         # discarded below.
         n_batches = int(np.ceil(P / batch_size))
@@ -747,37 +737,51 @@ class CannonModel(object):
                                              axis=0)
                 reg_P = jnp.concatenate([reg_P, edge(reg_P)], axis=0)
 
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            tqdm = None
+        # Reshape the (padded) pixel axis into (n_batches, batch_size, ...) and
+        # fit one batch per scan step. Pixels are fit independently, so the
+        # batching is only a loop granularity: vmap parallelizes within a batch
+        # while a device-side lax.scan walks the batches, driving a jax-tqdm
+        # progress bar via ordered host callbacks.
+        reshape_batches = lambda a: a.reshape((n_batches, batch_size) + a.shape[1:])
+        flux_b = reshape_batches(flux_PN)
+        ivar_b = reshape_batches(ivar_PN)
+        mask_b = reshape_batches(column_mask)
 
-        pbar = None
-        if progressbar and tqdm is not None:
-            pbar = tqdm(total=P, desc="Training", unit="px")
+        if closed_form:
+            pixels = jax.vmap(fitter, in_axes=(0, 0, None, 0))
 
-        theta_batches, s2_batches, fopt_batches = [], [], []
-        for b in range(n_batches):
-            sl = slice(b * batch_size, (b + 1) * batch_size)
-            th, s2b, fob = run_batch(sl)
-            theta_batches.append(th)
-            s2_batches.append(s2b)
-            fopt_batches.append(fob)
-            if pbar is not None:
-                # Block on the device so the bar tracks real work rather than
-                # JAX's asynchronous dispatch. With no bar we let the batches
-                # dispatch asynchronously and overlap.
-                jax.block_until_ready((th, s2b, fob))
-                pbar.update(min((b + 1) * batch_size, P) - b * batch_size)
+            def fit_batch(carry, x):
+                _i, fb, ib, cm = x
+                return carry, pixels(fb, ib, design_matrix, cm)
 
-        if pbar is not None:
-            pbar.close()
+            xs = (jnp.arange(n_batches), flux_b, ivar_b, mask_b)
+        else:
+            init_b = reshape_batches(init_stack)
+            reg_b = reshape_batches(reg_P)
+            pixels = jax.vmap(fitter, in_axes=(0, 0, 0, None, 0, 0))
 
-        # Concatenate the batches and drop any padding pixels. The trained
-        # quantities are kept as JAX arrays end-to-end.
-        theta = jnp.concatenate(theta_batches, axis=0)[:P]
-        s2 = jnp.concatenate(s2_batches, axis=0)[:P]
-        fopt = jnp.concatenate(fopt_batches, axis=0)[:P]
+            def fit_batch(carry, x):
+                _i, fb, ib, st, rg, cm = x
+                return carry, pixels(fb, ib, st, design_matrix, rg, cm)
+
+            xs = (jnp.arange(n_batches), flux_b, ivar_b, init_b, reg_b, mask_b)
+
+        if progressbar:
+            fit_batch = scan_tqdm(n_batches, desc="Training")(fit_batch)
+
+        @jax.jit
+        def run_training_scan(xs):
+            _, out = jax.lax.scan(fit_batch, None, xs)
+            return out
+
+        theta_b, s2_b, fopt_b = run_training_scan(xs)
+
+        # Flatten the batch axis back onto the pixel axis and drop any padding.
+        # The trained quantities are kept as JAX arrays end-to-end.
+        unbatch = lambda a: a.reshape((n_batches * batch_size,) + a.shape[2:])[:P]
+        theta = unbatch(theta_b)
+        s2 = unbatch(s2_b)
+        fopt = unbatch(fopt_b)
 
         # A single host transfer for the per-pixel metadata.
         fopt_values = fopt.tolist()
@@ -805,8 +809,8 @@ class CannonModel(object):
 
 
     @requires_training
-    def test(self, flux, ivar, initial_labels=None, threads=None, 
-        use_derivatives=True, op_kwds=None):
+    def test(self, flux, ivar, initial_labels=None, threads=None,
+        use_derivatives=True, op_kwds=None, progressbar=True, batch_size=None):
         """
         Run the test step on spectra.
 
@@ -824,12 +828,20 @@ class CannonModel(object):
             The number of parallel threads to use.
 
         :param use_derivatives: [optional]
-            Boolean `True` indicating to use analytic derivatives provided by 
+            Boolean `True` indicating to use analytic derivatives provided by
             the vectorizer, `None` to calculate on the fly, or a callable
             function to calculate your own derivatives.
 
         :param op_kwds: [optional]
             Optimization keywords that get passed to `scipy.optimize.leastsq`.
+
+        :param progressbar: [optional]
+            Display a jax-tqdm progress bar while spectra are fit.
+
+        :param batch_size: [optional]
+            The number of spectra to fit per vectorized batch. Stars are fit
+            independently, so this only controls progress-bar granularity and
+            bounds peak memory/compile cost. Defaults to ~50 progress updates.
         """
 
         if flux is None or ivar is None:
@@ -868,15 +880,53 @@ class CannonModel(object):
         core = fitting.make_spectrum_fitter(
             self.vectorizer, self.theta, self.s2, self._fiducials,
             self._scales, maxiter=maxiter, tol=tol)
-        batched = jax.jit(jax.vmap(core, in_axes=(0, 0, 0)))
 
-        op_labels, cov, chi_sq, model_flux, n_use = batched(
-            jnp.asarray(flux), jnp.asarray(ivar), jnp.asarray(initial_labels))
+        # Batch over stars so a device-side lax.scan can drive a jax-tqdm
+        # progress bar. Stars are fit independently (vmap within each batch);
+        # the batching is only loop granularity and does not change results.
+        if batch_size is None:
+            batch_size = max(1, int(np.ceil(S / 50)))
+        batch_size = int(min(max(1, batch_size), S))
+        n_batches = int(np.ceil(S / batch_size))
 
-        op_labels = np.asarray(op_labels)
-        cov = np.asarray(cov)
-        chi_sq = np.asarray(chi_sq)
-        n_use = np.asarray(n_use)
+        flux_j = jnp.asarray(flux)
+        ivar_j = jnp.asarray(ivar)
+        init_j = jnp.asarray(initial_labels)
+
+        # Pad the star axis up to whole batches so XLA compiles the scan body
+        # once; the duplicated padding stars are discarded below.
+        pad = n_batches * batch_size - S
+        if pad:
+            edge = lambda a: jnp.broadcast_to(a[-1:], (pad,) + a.shape[1:])
+            flux_j = jnp.concatenate([flux_j, edge(flux_j)], axis=0)
+            ivar_j = jnp.concatenate([ivar_j, edge(ivar_j)], axis=0)
+            init_j = jnp.concatenate([init_j, edge(init_j)], axis=0)
+
+        reshape_batches = lambda a: a.reshape((n_batches, batch_size) + a.shape[1:])
+        spectra = jax.vmap(core, in_axes=(0, 0, 0))
+
+        def fit_batch(carry, x):
+            _i, fb, ib, lb = x
+            return carry, spectra(fb, ib, lb)
+
+        if progressbar:
+            fit_batch = scan_tqdm(n_batches, desc="Testing")(fit_batch)
+
+        @jax.jit
+        def run_test_scan(xs):
+            _, out = jax.lax.scan(fit_batch, None, xs)
+            return out
+
+        xs = (jnp.arange(n_batches), reshape_batches(flux_j),
+              reshape_batches(ivar_j), reshape_batches(init_j))
+        op_labels, cov, chi_sq, model_flux, n_use = run_test_scan(xs)
+
+        # Flatten the batch axis back onto the star axis and drop padding.
+        unbatch = lambda a: a.reshape((n_batches * batch_size,) + a.shape[2:])[:S]
+        op_labels = np.asarray(unbatch(op_labels))
+        cov = np.asarray(unbatch(cov))
+        chi_sq = np.asarray(unbatch(chi_sq))
+        n_use = np.asarray(unbatch(n_use))
 
         meta = [dict(chi_sq=float(chi_sq[s]),
                      r_chi_sq=float(chi_sq[s]) / max(1, int(n_use[s]) - L - 1),

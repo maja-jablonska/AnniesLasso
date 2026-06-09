@@ -40,8 +40,8 @@ def _continuum_design_matrix(dispersion, L, order):
         ])
 
 
-def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3, 
-    regions=None, fill_value=1.0, **kwargs):
+def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
+    regions=None, fill_value=1.0, progressbar=True, **kwargs):
     """
     Fit the flux values of pre-defined continuum pixels using a sum of sine and
     cosine functions.
@@ -124,7 +124,19 @@ def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
 
     metadata = []
     continuum = np.ones_like(flux) * fill_value
-    for i in range(flux.shape[0]):
+
+    # The per-star fit below runs on the host (ragged per-region masks and
+    # Python-list metadata), so a plain tqdm bar is the right tool here -- the
+    # jax-tqdm bars used in CannonModel.train/test only work inside JAX loops.
+    star_iter = range(flux.shape[0])
+    if progressbar:
+        try:
+            from tqdm.auto import tqdm
+            star_iter = tqdm(star_iter, desc="Normalizing", unit="star")
+        except ImportError:
+            pass
+
+    for i in star_iter:
 
         warn_indices = np.where(warn_on_pixels[i])[0]
         if any(warn_indices):
@@ -182,8 +194,8 @@ def sines_and_cosines(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
     return (continuum, metadata) 
     
 
-def normalize(dispersion, flux, ivar, continuum_pixels, L=1400, order=3, 
-    regions=None, fill_value=1.0, **kwargs):
+def normalize(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
+    regions=None, fill_value=1.0, progressbar=True, **kwargs):
     """
     Pseudo-continuum-normalize the flux using a defined set of continuum pixels
     and a sum of sine and cosine functions.
@@ -229,17 +241,17 @@ def normalize(dispersion, flux, ivar, continuum_pixels, L=1400, order=3,
         The continuum values for all pixels, and a dictionary that contains 
         metadata about the fit.
     """
-    continuum, metadata = sines_and_cosines(dispersion, flux, ivar, 
+    continuum, metadata = sines_and_cosines(dispersion, flux, ivar,
         continuum_pixels, L=L, order=order, regions=regions,
-        fill_value=fill_value, **kwargs)
+        fill_value=fill_value, progressbar=progressbar, **kwargs)
 
     normalized_flux = flux/continuum
     normalized_ivar = continuum * ivar * continuum
-    normalized_flux[normalized_ivar == 0] = 1.0
-    
-    non_finite_pixels = ~np.isfinite(normalized_flux)
-    normalized_flux[non_finite_pixels] = 1.0
-    normalized_ivar[non_finite_pixels] = 0.0
+    normalized_flux = jnp.where(normalized_ivar == 0, 1.0, normalized_flux)
+
+    non_finite_pixels = ~jnp.isfinite(normalized_flux)
+    normalized_flux = jnp.where(non_finite_pixels, 1.0, normalized_flux)
+    normalized_ivar = jnp.where(non_finite_pixels, 0.0, normalized_ivar)
 
     return (normalized_flux, normalized_ivar, continuum, metadata)
 
