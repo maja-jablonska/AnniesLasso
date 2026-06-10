@@ -37,7 +37,8 @@ PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 # a CUDA jaxlib + wandb installed.
 PYTHON_BIN="python"
 WANDB_PROJECT="cannon-sweep"
-SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
+# --mass-col= (empty) disables the base+mass label-set variants.
+SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --mass-col= --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"
