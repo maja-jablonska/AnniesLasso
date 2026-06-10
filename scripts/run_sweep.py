@@ -43,10 +43,11 @@ import numpy as np
 # directly from the scripts/ directory.
 try:
     from scripts.train_cannon import (load_spectra, normalize_spectra,
-                                       DEFAULT_DATA_DIR, DEFAULT_LABELS)
+                                       quality_mask, DEFAULT_DATA_DIR,
+                                       DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
 except ImportError:
-    from train_cannon import (load_spectra, normalize_spectra,
+    from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_LABELS)
     from sweep_cannon import sweep
 
@@ -246,6 +247,18 @@ def main():
             norm_flux.shape[0], norm_flux.shape[1], names))
     else:
         label_source, dispersion, flux, ivar = load_spectra(args.spectra)
+
+        # Quality cuts before anything is normalized or trained on: drop stars
+        # with flagged spectra (spectrum_flags != 0) or any warn_* label set.
+        good = quality_mask(label_source)
+        if not good.any():
+            raise ValueError("quality cuts rejected every star; check the "
+                             "spectrum_flags / warn_* columns")
+        logger.info("quality cuts: keeping %d/%d stars",
+                    int(good.sum()), good.size)
+        label_source = label_source[good]
+        flux, ivar = flux[good], ivar[good]
+
         norm_flux, norm_ivar = normalize_spectra(
             dispersion, flux, ivar, args.continuum_list)
         label_sets = args.label_sets or build_label_sets(

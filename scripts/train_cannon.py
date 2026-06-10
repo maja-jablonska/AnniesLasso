@@ -104,6 +104,36 @@ def add_x_fe_columns(table):
     return table
 
 
+def quality_mask(table):
+    """
+    Boolean mask over the rows of ``table`` selecting stars that pass the
+    quality cuts: ``spectrum_flags == 0`` (no flagged reduction/calibration
+    issues) and no ``warn_*`` column set to True. Missing columns skip the
+    corresponding cut with a warning rather than rejecting everything.
+    """
+    n = len(table)
+    mask = np.ones(n, dtype=bool)
+
+    if "spectrum_flags" in table.columns:
+        clean = np.asarray(table["spectrum_flags"].fillna(-1) == 0)
+        logger.info("quality cut: %d/%d stars rejected by spectrum_flags != 0",
+                    int((~clean).sum()), n)
+        mask &= clean
+    else:
+        logger.warning("no spectrum_flags column; skipping that quality cut")
+
+    warn_columns = [c for c in table.columns if str(c).startswith("warn_")]
+    if warn_columns:
+        for column in warn_columns:
+            mask &= ~np.asarray(table[column].fillna(False), dtype=bool)
+        logger.info("quality cut: %d/%d stars left after rejecting any of "
+                    "%s set", int(mask.sum()), n, ", ".join(warn_columns))
+    else:
+        logger.warning("no warn_* columns; skipping that quality cut")
+
+    return mask
+
+
 def load_spectra(spectra_path):
     """
     Read the parquet table and assemble ``(spectra, dispersion, flux, ivar)``.
