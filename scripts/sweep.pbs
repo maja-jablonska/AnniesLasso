@@ -35,7 +35,8 @@ WANDB_PROJECT="cannon-sweep"
 # spectra (defaults point at the bulge-ages-and-orbits data) and cross-validates
 # the grid. Override --spectra/--continuum-list/--labels/--orders/etc. as needed,
 # or pass --demo to dry-run on the bundled golden data.
-SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
+# --mass-col= (empty) disables the base+mass label-set variants.
+SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --mass-col= --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"

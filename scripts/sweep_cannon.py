@@ -146,17 +146,23 @@ def cross_validate(label_array, flux, ivar, dispersion, label_names, order,
     r_chi_sq = np.full(N, np.nan, dtype=float)
     in_hull = np.zeros(N, dtype=bool)
 
+    # One vectorizer for every fold (it is stateless), and no per-fold progress
+    # bars: tqdm host callbacks get baked into the compiled scan, which would
+    # force a recompile per fold instead of reusing one program on the device.
+    vectorizer = PolynomialVectorizer(label_names=label_names, order=order)
+    train_kwds = {"progressbar": False, **(train_kwds or {})}
+    test_kwds = {"progressbar": False, **(test_kwds or {})}
+
     for train_idx, test_idx in _kfold_indices(N, n_splits, seed):
 
-        vectorizer = PolynomialVectorizer(label_names=label_names, order=order)
         model = CannonModel(
             label_array[train_idx], flux[train_idx], ivar[train_idx],
             vectorizer, dispersion=dispersion, regularization=regularization,
             censors=censors)
-        model.train(progressbar=False, **(train_kwds or {}))
+        model.train(**train_kwds)
 
         op_labels, _, meta = model.test(
-            flux[test_idx], ivar[test_idx], **(test_kwds or {}))
+            flux[test_idx], ivar[test_idx], **test_kwds)
 
         recovered[test_idx] = op_labels
         r_chi_sq[test_idx] = [m["r_chi_sq"] for m in meta]

@@ -20,9 +20,8 @@ Usage
     python -m scripts.run_sweep \\
         --spectra /path/cleaned_ages.parquet \\
         --continuum-list /path/continuum.list \\
-        --labels raw_teff,raw_logg,raw_fe_h,raw_mg_h,raw_ce_h,age_L,mass_L \\
         --label-set raw_teff,raw_logg,raw_fe_h \\
-        --label-set raw_teff,raw_logg,raw_fe_h,raw_mg_h,raw_ce_h \\
+        --label-set raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe \\
         --orders 1,2 --regularizations 0,1e2,1e3,1e4 \\
         --n-splits 5 --wandb-project cannon-sweep
 
@@ -44,14 +43,34 @@ import numpy as np
 # directly from the scripts/ directory.
 try:
     from scripts.train_cannon import (load_spectra, normalize_spectra,
-                                       DEFAULT_DATA_DIR, DEFAULT_LABELS)
+                                       quality_mask, DEFAULT_DATA_DIR,
+                                       DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
 except ImportError:
-    from train_cannon import (load_spectra, normalize_spectra,
+    from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_LABELS)
     from sweep_cannon import sweep
 
 logger = logging.getLogger("thecannon.run_sweep")
+
+
+def enable_jax_compilation_cache(cache_dir):
+    """
+    Turn on JAX's persistent (on-disk) compilation cache. The sweep's jitted
+    train/test programs take every model-specific array as an argument, so
+    grid points that share shapes produce byte-identical HLO -- the first run
+    of a sweep pays the XLA compilation cost once per shape, and every later
+    fold, regularization strength, restarted job, or re-run hits this cache
+    instead of recompiling.
+    """
+    import jax
+    cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
+    os.makedirs(cache_dir, exist_ok=True)
+    jax.config.update("jax_compilation_cache_dir", cache_dir)
+    # Persist every program that takes >= 1 s to compile, regardless of size.
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    logger.info("JAX persistent compilation cache: %s", cache_dir)
 
 
 def build_label_sets(base_core, age_cols, mass_col, abundances, mode):
@@ -150,7 +169,7 @@ def main():
                         default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
                         help="text file of continuum pixel indices")
     parser.add_argument("--base", type=lambda s: s.split(","),
-                        default=["raw_teff", "raw_logg", "raw_fe_h", "raw_mg_h"],
+                        default=["raw_teff", "raw_logg", "raw_fe_h", "mg_fe"],
                         help="comma-separated core labels in every set (the age "
                              "column from --age-cols is appended to this)")
     parser.add_argument("--age-cols", type=lambda s: s.split(","),
@@ -161,9 +180,11 @@ def main():
                         help="mass column added by the 'age and mass' sets "
                              "(empty string to disable)")
     parser.add_argument("--abundances", type=lambda s: s.split(","),
-                        default=["raw_ce_h", "raw_ca_h", "raw_si_h", "raw_ni_h",
-                                 "raw_mn_h", "raw_al_h", "raw_c_h", "raw_n_h"],
-                        help="comma-separated abundances to test on top of base")
+                        default=["ce_fe", "ca_fe", "si_fe", "ni_fe",
+                                 "mn_fe", "al_fe", "c_fe", "n_fe"],
+                        help="comma-separated abundances to test on top of base "
+                             "(the <x>_fe columns are derived from raw_<x>_h - "
+                             "raw_fe_h at load time)")
     parser.add_argument("--label-set-mode", default="one-at-a-time",
                         choices=["one-at-a-time", "cumulative", "minimal"],
                         help="how extras are combined with each base")
@@ -188,6 +209,12 @@ def main():
     parser.add_argument("--wandb-mode", default="offline",
                         choices=["offline", "online", "disabled"],
                         help="W&B run mode (default: offline)")
+    parser.add_argument("--jax-cache-dir",
+                        default=os.environ.get("JAX_COMPILATION_CACHE_DIR",
+                                               "~/.cache/thecannon-jax"),
+                        help="persistent XLA compilation cache directory "
+                             "(reused across folds/grid points/jobs); pass an "
+                             "empty string to disable")
     parser.add_argument("--demo", action="store_true",
                         help="run on the bundled golden data instead")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -197,6 +224,9 @@ def main():
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(message)s")
+
+    if args.jax_cache_dir:
+        enable_jax_compilation_cache(args.jax_cache_dir)
 
     if args.demo:
         import pickle
@@ -217,6 +247,18 @@ def main():
             norm_flux.shape[0], norm_flux.shape[1], names))
     else:
         label_source, dispersion, flux, ivar = load_spectra(args.spectra)
+
+        # Quality cuts before anything is normalized or trained on: drop stars
+        # with flagged spectra (spectrum_flags != 0) or any warn_* label set.
+        good = quality_mask(label_source)
+        if not good.any():
+            raise ValueError("quality cuts rejected every star; check the "
+                             "spectrum_flags / warn_* columns")
+        logger.info("quality cuts: keeping %d/%d stars",
+                    int(good.sum()), good.size)
+        label_source = label_source[good]
+        flux, ivar = flux[good], ivar[good]
+
         norm_flux, norm_ivar = normalize_spectra(
             dispersion, flux, ivar, args.continuum_list)
         label_sets = args.label_sets or build_label_sets(

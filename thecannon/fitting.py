@@ -27,6 +27,7 @@ import logging
 import numpy as np
 import jax
 import jax.numpy as jnp
+from functools import lru_cache
 from jax import lax
 from time import time
 
@@ -255,6 +256,11 @@ def make_pixel_fitter(op_method="l_bfgs_b", maxiter=_TRAIN_MAXITER,
     Build a pure, ``jax.vmap``-able function that fits the theta coefficients
     and noise residual for a single pixel.
 
+    Unbounded fitters are memoized on ``(op_method, maxiter, tol)`` so that
+    repeated calls (e.g. one per cross-validation fold or sweep grid point)
+    return the *same* function object and JAX's jit cache can reuse the
+    compiled program instead of recompiling.
+
     :param op_method: [optional]
         The optimization method. ``"l_bfgs_b"`` (default) minimizes the
         combined ``chi_sq + lambda * ||theta[1:]||_1`` objective with L-BFGS
@@ -283,6 +289,21 @@ def make_pixel_fitter(op_method="l_bfgs_b", maxiter=_TRAIN_MAXITER,
     if op_method not in ("l_bfgs_b", "proximal"):
         raise ValueError("unknown optimization method '{}' -- 'l_bfgs_b' or "
                          "'proximal' are available".format(op_method))
+
+    if bounds is None:
+        # Bounds are arrays (unhashable), so only the unbounded fitters are
+        # memoized; bounded models (RestrictedCannonModel) rebuild each time.
+        return _make_unbounded_pixel_fitter(op_method, maxiter, tol)
+
+    return _build_pixel_fitter(op_method, maxiter, tol, bounds)
+
+
+@lru_cache(maxsize=None)
+def _make_unbounded_pixel_fitter(op_method, maxiter, tol):
+    return _build_pixel_fitter(op_method, maxiter, tol, None)
+
+
+def _build_pixel_fitter(op_method, maxiter, tol, bounds):
 
     if bounds is not None:
         lower, upper = (jnp.asarray(bounds[0]), jnp.asarray(bounds[1]))
@@ -346,12 +367,15 @@ def make_pixel_fitter(op_method="l_bfgs_b", maxiter=_TRAIN_MAXITER,
     return fit
 
 
+@lru_cache(maxsize=None)
 def make_pixel_closed_form():
     """
     Build a pure, ``jax.vmap``-able function that fits a single pixel in closed
     form. With no regularization and no box constraints the pixel objective is a
     convex quadratic (weighted least squares), so its minimum is the
     normal-equations solution and the iterative optimizer is unnecessary.
+    Memoized: every call returns the same function object so JAX's jit cache
+    can reuse the compiled program across folds and sweep grid points.
 
     :returns:
         A function ``fit(flux, ivar, design_matrix, column_mask)`` returning
@@ -658,6 +682,36 @@ def fit_pixel_fixed_scatter(flux, ivar, initial_thetas, design_matrix,
 #  Per-spectrum label inference (test step)                                    #
 # --------------------------------------------------------------------------- #
 
+def _freeze_terms(terms):
+    """ A hashable (nested-tuple) copy of a vectorizer's ``terms`` structure. """
+    return tuple(tuple(tuple(t) for t in term) for term in terms)
+
+
+def spectrum_fitter_core(vectorizer, maxiter=_TEST_MAXITER, tol=_TEST_TOL):
+    """
+    Return the pure, ``jax.vmap``-able single-spectrum fitter
+
+        ``core(flux, ivar, initial_labels, theta, s2, fiducials, scales)``
+
+    for the given vectorizer. The trained-model arrays are call-time arguments
+    (not closed-over constants), and the core is memoized on the vectorizer's
+    ``terms``, so models that share a vectorizer structure -- e.g. every
+    cross-validation fold of a sweep grid point -- reuse one compiled program
+    instead of recompiling per trained model.
+    """
+    key = (type(vectorizer).__name__, _freeze_terms(vectorizer.terms),
+           maxiter, tol)
+    try:
+        return _SPECTRUM_FITTER_CACHE[key]
+    except KeyError:
+        core = _build_spectrum_fitter(vectorizer, maxiter, tol)
+        _SPECTRUM_FITTER_CACHE[key] = core
+        return core
+
+
+_SPECTRUM_FITTER_CACHE = {}
+
+
 def make_spectrum_fitter(vectorizer, theta, s2, fiducials, scales,
     maxiter=_TEST_MAXITER, tol=_TEST_TOL):
     """
@@ -670,12 +724,21 @@ def make_spectrum_fitter(vectorizer, theta, s2, fiducials, scales,
         is a ``(n_init, L)`` array of starting points (the best is selected).
     """
 
+    fitter = spectrum_fitter_core(vectorizer, maxiter=maxiter, tol=tol)
     theta = jnp.asarray(theta)
     s2 = jnp.asarray(s2)
     fiducials = jnp.asarray(fiducials)
     scales = jnp.asarray(scales)
 
     def core(flux, ivar, initial_labels):
+        return fitter(flux, ivar, initial_labels, theta, s2, fiducials, scales)
+
+    return core
+
+
+def _build_spectrum_fitter(vectorizer, maxiter, tol):
+
+    def core(flux, ivar, initial_labels, theta, s2, fiducials, scales):
 
         adjusted_ivar = ivar / (1. + ivar * s2)
 
