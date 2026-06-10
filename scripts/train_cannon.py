@@ -74,14 +74,47 @@ def _to_array(x):
     return np.asarray(x, dtype=float)
 
 
+def add_x_fe_columns(table):
+    """
+    Derive [X/Fe] abundance columns from the raw [X/H] ones: every
+    ``raw_<x>_h`` column except iron itself gains a ``<x>_fe`` counterpart
+    equal to ``raw_<x>_h - raw_fe_h``. Existing columns are never overwritten,
+    and the table is returned (modified in place) for convenience.
+    """
+    import re
+
+    if "raw_fe_h" not in table.columns:
+        logger.warning("no raw_fe_h column; cannot derive any [X/Fe] columns")
+        return table
+
+    fe_h = np.asarray(table["raw_fe_h"], dtype=float)
+    derived = []
+    for column in list(table.columns):
+        match = re.fullmatch(r"raw_([a-z0-9]+)_h", str(column))
+        if match is None or match.group(1) == "fe":
+            continue
+        name = "{0}_fe".format(match.group(1))
+        if name in table.columns:
+            continue
+        table[name] = np.asarray(table[column], dtype=float) - fe_h
+        derived.append(name)
+
+    if derived:
+        logger.info("derived [X/Fe] columns: %s", ", ".join(derived))
+    return table
+
+
 def load_spectra(spectra_path):
     """
     Read the parquet table and assemble ``(spectra, dispersion, flux, ivar)``.
-    Each of the ``wavelength``/``flux``/``ivar`` columns holds one array per row.
+    Each of the ``wavelength``/``flux``/``ivar`` columns holds one array per
+    row. Derived ``<x>_fe`` abundance columns are added alongside the raw
+    ``raw_<x>_h`` ones (see :func:`add_x_fe_columns`).
     """
     import pandas as pd
 
     spectra = pd.read_parquet(spectra_path)
+    add_x_fe_columns(spectra)
 
     dispersion = _to_array(spectra["wavelength"].iloc[0])         # (n_pixels,)
     flux = np.vstack([_to_array(x) for x in spectra["flux"]])     # (n_stars, P)

@@ -20,9 +20,8 @@ Usage
     python -m scripts.run_sweep \\
         --spectra /path/cleaned_ages.parquet \\
         --continuum-list /path/continuum.list \\
-        --labels raw_teff,raw_logg,raw_fe_h,raw_mg_h,raw_ce_h,age_L,mass_L \\
         --label-set raw_teff,raw_logg,raw_fe_h \\
-        --label-set raw_teff,raw_logg,raw_fe_h,raw_mg_h,raw_ce_h \\
+        --label-set raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe \\
         --orders 1,2 --regularizations 0,1e2,1e3,1e4 \\
         --n-splits 5 --wandb-project cannon-sweep
 
@@ -169,7 +168,7 @@ def main():
                         default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
                         help="text file of continuum pixel indices")
     parser.add_argument("--base", type=lambda s: s.split(","),
-                        default=["raw_teff", "raw_logg", "raw_fe_h", "raw_mg_h"],
+                        default=["raw_teff", "raw_logg", "raw_fe_h", "mg_fe"],
                         help="comma-separated core labels in every set (the age "
                              "column from --age-cols is appended to this)")
     parser.add_argument("--age-cols", type=lambda s: s.split(","),
@@ -180,9 +179,11 @@ def main():
                         help="mass column added by the 'age and mass' sets "
                              "(empty string to disable)")
     parser.add_argument("--abundances", type=lambda s: s.split(","),
-                        default=["raw_ce_h", "raw_ca_h", "raw_si_h", "raw_ni_h",
-                                 "raw_mn_h", "raw_al_h", "raw_c_h", "raw_n_h"],
-                        help="comma-separated abundances to test on top of base")
+                        default=["ce_fe", "ca_fe", "si_fe", "ni_fe",
+                                 "mn_fe", "al_fe", "c_fe", "n_fe"],
+                        help="comma-separated abundances to test on top of base "
+                             "(the <x>_fe columns are derived from raw_<x>_h - "
+                             "raw_fe_h at load time)")
     parser.add_argument("--label-set-mode", default="one-at-a-time",
                         choices=["one-at-a-time", "cumulative", "minimal"],
                         help="how extras are combined with each base")
