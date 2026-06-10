@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import os
 import pickle
 from datetime import datetime
-from functools import wraps
+from functools import lru_cache, wraps
 from sys import version_info
 from scipy.spatial import Delaunay
 from jax_tqdm import scan_tqdm
@@ -46,6 +46,106 @@ _TRAIN_BATCH_MEM_BYTES = 1 << 30  # 1 GiB
 # the LM workspace holds several such copies and the compiled scan body also
 # drives a device-side CUDA graph whose size grows with the batch.
 _TEST_BATCH_MEM_BYTES = 1 << 28  # 256 MiB
+
+
+# --------------------------------------------------------------------------- #
+#  Cached scan runners                                                         #
+# --------------------------------------------------------------------------- #
+#
+#  The train/test steps run a jitted lax.scan whose body vmaps a per-pixel (or
+#  per-spectrum) fitter. Building that jitted function inside train()/test()
+#  would hand XLA a *new* Python callable on every call -- so a hyper-parameter
+#  sweep or k-fold cross-validation would recompile the same program for every
+#  fold of every grid point, which on a GPU can cost more than the actual
+#  compute. Instead the runners are built once per (fitter, progress-bar)
+#  combination and memoized, and everything that varies between calls (the
+#  design matrix, the trained theta/s2, the data batches) is passed in as an
+#  argument. Calls that share shapes then hit JAX's jit cache, and -- because
+#  no large arrays are baked into the HLO as constants -- identical programs
+#  also hit the persistent compilation cache across processes when
+#  ``jax.config.jax_compilation_cache_dir`` is set.
+#
+#  ``maxsize`` bounds the number of live jitted programs (relevant for
+#  errors-in-variables / bounded fitters, which are rebuilt per call and would
+#  otherwise grow the cache without limit).
+
+@lru_cache(maxsize=32)
+def _training_scan_runner(fitter, closed_form, tqdm_n_batches):
+    """
+    Build the jitted ``run(design_matrix, xs) -> (theta, s2, fopt)`` scan for a
+    per-pixel ``fitter``. ``tqdm_n_batches`` attaches a jax-tqdm progress bar
+    when non-zero (it must equal the number of scan steps).
+    """
+    if closed_form:
+        pixels = jax.vmap(fitter, in_axes=(0, 0, None, 0))
+
+        def fit_batch(design_matrix, x):
+            _i, fb, ib, cm = x
+            return design_matrix, pixels(fb, ib, design_matrix, cm)
+    else:
+        pixels = jax.vmap(fitter, in_axes=(0, 0, 0, None, 0, 0))
+
+        def fit_batch(design_matrix, x):
+            _i, fb, ib, st, rg, cm = x
+            return design_matrix, pixels(fb, ib, st, design_matrix, rg, cm)
+
+    if tqdm_n_batches:
+        fit_batch = scan_tqdm(tqdm_n_batches, desc="Training")(fit_batch)
+
+    @jax.jit
+    def run(design_matrix, xs):
+        _, out = jax.lax.scan(fit_batch, design_matrix, xs)
+        return out
+
+    return run
+
+
+@lru_cache(maxsize=32)
+def _test_scan_runner(core, tqdm_n_batches):
+    """
+    Build the jitted ``run(model_state, xs) -> (op_labels, cov, chi_sq, n_use)``
+    scan for a per-spectrum ``core``, where ``model_state`` is the
+    ``(theta, s2, fiducials, scales)`` tuple of the trained model.
+    """
+    spectra = jax.vmap(core, in_axes=(0, 0, 0, None, None, None, None))
+
+    def fit_batch(model_state, x):
+        _i, fb, ib, lb = x
+        op_labels, cov, chi_sq, _model_flux, n_use = spectra(
+            fb, ib, lb, *model_state)
+        # Drop the per-star model flux (P,): ``test`` does not return it, so
+        # accumulating it across the scan would waste device memory of order
+        # the whole validation set (S, P) for nothing.
+        return model_state, (op_labels, cov, chi_sq, n_use)
+
+    if tqdm_n_batches:
+        fit_batch = scan_tqdm(tqdm_n_batches, desc="Testing")(fit_batch)
+
+    @jax.jit
+    def run(model_state, xs):
+        _, out = jax.lax.scan(fit_batch, model_state, xs)
+        return out
+
+    return run
+
+
+@jax.jit
+def _initial_theta_stack(flux_PN, ivar_PN, design_matrix):
+    """
+    The ``(P, 2, T)`` stack of initial theta guesses for every pixel: the
+    linear-algebra estimate and the fiducial value. Module-level and jitted so
+    repeated same-shape calls reuse the compiled program.
+    """
+    P = flux_PN.shape[0]
+    T = design_matrix.shape[1]
+    fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
+    linalg_theta = jax.vmap(
+        lambda f, i: fitting.fit_theta_by_linalg(
+            f, i, 0.0, design_matrix)[0])(flux_PN, ivar_PN)
+    finite = jnp.all(jnp.isfinite(linalg_theta), axis=1, keepdims=True)
+    linalg_theta = jnp.where(finite, linalg_theta, fiducial[None, :])
+    return jnp.stack(
+        [linalg_theta, jnp.broadcast_to(fiducial, (P, T))], axis=1)
 
 
 def requires_training(method):
@@ -771,20 +871,9 @@ class CannonModel(object):
             # Initial theta guesses for every pixel: a linear-algebra estimate
             # and the fiducial value. The regularized objective is convex, so
             # the optimum is independent of the starting point; these only set
-            # where the optimizer begins. Computed in a single jitted (hence
-            # fused) call rather than op-by-op.
-            @jax.jit
-            def _initial_stack(flux_PN, ivar_PN):
-                linalg_theta = jax.vmap(
-                    lambda f, i: fitting.fit_theta_by_linalg(
-                        f, i, 0.0, design_matrix)[0])(flux_PN, ivar_PN)
-                finite = jnp.all(
-                    jnp.isfinite(linalg_theta), axis=1, keepdims=True)
-                linalg_theta = jnp.where(finite, linalg_theta, fiducial[None, :])
-                return jnp.stack(
-                    [linalg_theta, jnp.broadcast_to(fiducial, (P, T))], axis=1)
-
-            init_stack = _initial_stack(flux_PN, ivar_PN)        # (P, 2, T)
+            # where the optimizer begins.
+            init_stack = _initial_theta_stack(
+                flux_PN, ivar_PN, design_matrix)                 # (P, 2, T)
 
             if eiv:
                 fitter = fitting.make_pixel_fitter_eiv(
@@ -851,33 +940,20 @@ class CannonModel(object):
         mask_b = reshape_batches(column_mask)
 
         if closed_form:
-            pixels = jax.vmap(fitter, in_axes=(0, 0, None, 0))
-
-            def fit_batch(carry, x):
-                _i, fb, ib, cm = x
-                return carry, pixels(fb, ib, design_matrix, cm)
-
             xs = (jnp.arange(n_batches), flux_b, ivar_b, mask_b)
         else:
             init_b = reshape_batches(init_stack)
             reg_b = reshape_batches(reg_P)
-            pixels = jax.vmap(fitter, in_axes=(0, 0, 0, None, 0, 0))
-
-            def fit_batch(carry, x):
-                _i, fb, ib, st, rg, cm = x
-                return carry, pixels(fb, ib, st, design_matrix, rg, cm)
-
             xs = (jnp.arange(n_batches), flux_b, ivar_b, init_b, reg_b, mask_b)
 
-        if progressbar:
-            fit_batch = scan_tqdm(n_batches, desc="Training")(fit_batch)
+        # The runner is memoized on (fitter, closed_form, progress bar) and the
+        # design matrix is an argument, so same-shape calls -- e.g. every fold
+        # and regularization strength of a sweep grid point -- reuse one
+        # compiled program instead of recompiling.
+        run_training_scan = _training_scan_runner(
+            fitter, closed_form, n_batches if progressbar else 0)
 
-        @jax.jit
-        def run_training_scan(xs):
-            _, out = jax.lax.scan(fit_batch, None, xs)
-            return out
-
-        theta_b, s2_b, fopt_b = run_training_scan(xs)
+        theta_b, s2_b, fopt_b = run_training_scan(design_matrix, xs)
 
         # Flatten the batch axis back onto the pixel axis and drop any padding.
         # The trained quantities are kept as JAX arrays end-to-end.
@@ -980,9 +1056,14 @@ class CannonModel(object):
         maxiter = op_kwds.get("maxiter", fitting._TEST_MAXITER)
         tol = op_kwds.get("tol", fitting._TEST_TOL)
 
-        core = fitting.make_spectrum_fitter(
-            self.vectorizer, self.theta, self.s2, self._fiducials,
-            self._scales, maxiter=maxiter, tol=tol)
+        # The core is memoized on the vectorizer's terms and takes the trained
+        # model arrays as arguments, so every same-shape test call (e.g. each
+        # cross-validation fold of a sweep grid point) reuses one compiled
+        # program rather than recompiling with theta baked in as a constant.
+        core = fitting.spectrum_fitter_core(
+            self.vectorizer, maxiter=maxiter, tol=tol)
+        model_state = (jnp.asarray(self.theta), jnp.asarray(self.s2),
+                       jnp.asarray(self._fiducials), jnp.asarray(self._scales))
 
         # Batch over stars so a device-side lax.scan can drive a jax-tqdm
         # progress bar. Stars are fit independently (vmap within each batch);
@@ -1021,27 +1102,13 @@ class CannonModel(object):
             init_j = jnp.concatenate([init_j, edge(init_j)], axis=0)
 
         reshape_batches = lambda a: a.reshape((n_batches, batch_size) + a.shape[1:])
-        spectra = jax.vmap(core, in_axes=(0, 0, 0))
 
-        def fit_batch(carry, x):
-            _i, fb, ib, lb = x
-            op_labels, cov, chi_sq, _model_flux, n_use = spectra(fb, ib, lb)
-            # Drop the per-star model flux (P,): ``test`` does not return it, so
-            # accumulating it across the scan would waste device memory of order
-            # the whole validation set (S, P) for nothing.
-            return carry, (op_labels, cov, chi_sq, n_use)
-
-        if progressbar:
-            fit_batch = scan_tqdm(n_batches, desc="Testing")(fit_batch)
-
-        @jax.jit
-        def run_test_scan(xs):
-            _, out = jax.lax.scan(fit_batch, None, xs)
-            return out
+        run_test_scan = _test_scan_runner(
+            core, n_batches if progressbar else 0)
 
         xs = (jnp.arange(n_batches), reshape_batches(flux_j),
               reshape_batches(ivar_j), reshape_batches(init_j))
-        op_labels, cov, chi_sq, n_use = run_test_scan(xs)
+        op_labels, cov, chi_sq, n_use = run_test_scan(model_state, xs)
 
         # Flatten the batch axis back onto the star axis and drop padding.
         unbatch = lambda a: a.reshape((n_batches * batch_size,) + a.shape[2:])[:S]

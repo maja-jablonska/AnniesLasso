@@ -54,6 +54,25 @@ except ImportError:
 logger = logging.getLogger("thecannon.run_sweep")
 
 
+def enable_jax_compilation_cache(cache_dir):
+    """
+    Turn on JAX's persistent (on-disk) compilation cache. The sweep's jitted
+    train/test programs take every model-specific array as an argument, so
+    grid points that share shapes produce byte-identical HLO -- the first run
+    of a sweep pays the XLA compilation cost once per shape, and every later
+    fold, regularization strength, restarted job, or re-run hits this cache
+    instead of recompiling.
+    """
+    import jax
+    cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
+    os.makedirs(cache_dir, exist_ok=True)
+    jax.config.update("jax_compilation_cache_dir", cache_dir)
+    # Persist every program that takes >= 1 s to compile, regardless of size.
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    logger.info("JAX persistent compilation cache: %s", cache_dir)
+
+
 def build_label_sets(base_core, age_cols, mass_col, abundances, mode):
     """
     Build the grid of label sets from a fixed core, one or more age columns
@@ -188,6 +207,12 @@ def main():
     parser.add_argument("--wandb-mode", default="offline",
                         choices=["offline", "online", "disabled"],
                         help="W&B run mode (default: offline)")
+    parser.add_argument("--jax-cache-dir",
+                        default=os.environ.get("JAX_COMPILATION_CACHE_DIR",
+                                               "~/.cache/thecannon-jax"),
+                        help="persistent XLA compilation cache directory "
+                             "(reused across folds/grid points/jobs); pass an "
+                             "empty string to disable")
     parser.add_argument("--demo", action="store_true",
                         help="run on the bundled golden data instead")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -197,6 +222,9 @@ def main():
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(message)s")
+
+    if args.jax_cache_dir:
+        enable_jax_compilation_cache(args.jax_cache_dir)
 
     if args.demo:
         import pickle

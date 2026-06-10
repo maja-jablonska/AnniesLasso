@@ -1,0 +1,85 @@
+#!/bin/bash
+# ===========================================================================
+#  The Cannon hyper-parameter sweep -- single-GPU PBS job.
+#
+#  The sweep runs the grid points *sequentially* on one GPU: each train/test
+#  step is internally vectorized (jax.vmap over pixels/stars), so a single
+#  grid point already saturates the device and running combinations in
+#  parallel would only contend for it. The compiled train/test programs are
+#  reused across folds, regularization strengths and same-shape grid points,
+#  and the persistent XLA cache (JAX_COMPILATION_CACHE_DIR) carries the
+#  compilations across restarted/repeated jobs, so only the first encounter
+#  of each new shape pays a compile.
+#
+#  Queue/resource notes (NCI Gadi): gpuvolta charges 12 CPUs per GPU, so
+#  ncpus must be 12 * ngpus; memory up to ~95GB per GPU. Adjust for other
+#  PBS sites. The Python environment must have a CUDA-enabled jaxlib
+#  (e.g. `pip install "jax[cuda12]"`).
+#
+#  Submit with:   qsub scripts/sweep_gpu.pbs
+# ===========================================================================
+#PBS -N cannon-sweep-gpu
+#PBS -P REPLACE_WITH_PROJECT
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=95GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration ---------------------------------------------------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to the Python interpreter (conda/venv) that has thecannon with
+# a CUDA jaxlib + wandb installed.
+PYTHON_BIN="python"
+WANDB_PROJECT="cannon-sweep"
+SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+# Persistent XLA compilation cache, shared across jobs. Keep it on /scratch
+# (not $HOME, which has a small quota) so repeated sweeps skip compilation.
+export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
+mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
+
+# Let JAX pick the GPU; fall back loudly (rather than silently training on
+# CPU for hours) if the CUDA backend is unavailable.
+unset JAX_PLATFORMS
+${PYTHON_BIN} - <<'EOF'
+import jax
+devices = jax.devices()
+print("JAX backend:", jax.default_backend(), devices)
+assert jax.default_backend() == "gpu", \
+    "no GPU backend -- is a CUDA jaxlib installed in this environment?"
+EOF
+
+# The default is to grab 75% of GPU memory up front; the sweep's batch sizes
+# are already memory-budgeted, so let allocations grow as needed instead and
+# leave headroom for the largest grid points.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+# Keep W&B fully offline on the compute node; runs are uploaded later on copyq.
+export WANDB_MODE=offline
+export WANDB_DIR="${PROJECT_DIR}/wandb"
+mkdir -p "${WANDB_DIR}"
+
+echo "[$(date)] starting GPU sweep on $(hostname)"
+${SWEEP_CMD}
+sweep_rc=$?
+echo "[$(date)] sweep finished with exit code ${sweep_rc}"
+
+# Spawn the copyq job to upload the offline runs (it has external network
+# access). Whatever offline runs exist are synced, even if the sweep partially
+# failed, so we submit regardless of sweep_rc.
+echo "[$(date)] submitting copyq sync job"
+sync_job=$(qsub \
+    -v "PROJECT_DIR=${PROJECT_DIR},PYTHON_BIN=${PYTHON_BIN},WANDB_DIR=${WANDB_DIR}" \
+    "${PROJECT_DIR}/scripts/sync_wandb.pbs")
+echo "[$(date)] submitted sync job: ${sync_job}"
+
+exit ${sweep_rc}
