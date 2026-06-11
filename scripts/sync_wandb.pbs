@@ -38,13 +38,21 @@ export WANDB_DIR="${WANDB_DIR}"
 
 echo "[$(date)] syncing offline W&B runs in ${WANDB_DIR} from $(hostname)"
 
-# Prefer the bulk flag (scans ./wandb, i.e. ${WANDB_DIR} since we cd'd here);
-# fall back to syncing each offline run directory explicitly.
-if ! "${PYTHON_BIN}" -m wandb sync --sync-all; then
-    echo "[$(date)] --sync-all failed; syncing run directories individually"
-    for run_dir in "${WANDB_DIR}"/offline-run-*; do
-        [ -d "${run_dir}" ] && "${PYTHON_BIN}" -m wandb sync "${run_dir}"
-    done
+# wandb nests run directories one level below WANDB_DIR (${WANDB_DIR}/wandb/
+# offline-run-*), so sync each run directory explicitly -- `wandb sync
+# --sync-all` scans ./wandb relative to the cwd and exits 0 even when it finds
+# nothing, which silently skips everything when cwd != WANDB_DIR's parent.
+shopt -s nullglob
+run_dirs=( "${WANDB_DIR}"/wandb/offline-run-* "${WANDB_DIR}"/offline-run-* )
+if [ ${#run_dirs[@]} -eq 0 ]; then
+    echo "[$(date)] no offline runs found under ${WANDB_DIR}"
+    exit 1
 fi
 
-echo "[$(date)] sync complete"
+rc=0
+for run_dir in "${run_dirs[@]}"; do
+    "${PYTHON_BIN}" -m wandb sync "${run_dir}" || rc=1
+done
+
+echo "[$(date)] sync complete (exit ${rc})"
+exit ${rc}
