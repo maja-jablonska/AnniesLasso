@@ -129,19 +129,27 @@ def _test_scan_runner(core, tqdm_n_batches):
     return run
 
 
-@jax.jit
-def _initial_theta_stack(flux_PN, ivar_PN, design_matrix):
+def _initial_theta_stack(flux_PN, ivar_PN, design_matrix, batch_size):
     """
     The ``(P, 2, T)`` stack of initial theta guesses for every pixel: the
-    linear-algebra estimate and the fiducial value. Module-level and jitted so
-    repeated same-shape calls reuse the compiled program.
+    linear-algebra estimate and the fiducial value.
+
+    The per-pixel linalg estimate is mapped over pixels in chunks of
+    ``batch_size`` via ``jax.lax.map`` rather than one giant ``vmap``: a single
+    vmap over all P pixels would materialize the ``(P, S, T)`` design-times-ivar
+    products at once (tens of GiB at high polynomial order), so chunking bounds
+    the peak working set the same way the main training loop's ``batch_size``
+    does. ``jax.lax.map`` compiles and caches its own batched scan body, so the
+    function is left un-jitted (nesting ``lax.map(batch_size=...)`` inside
+    ``jax.jit`` is unsupported).
     """
     P = flux_PN.shape[0]
     T = design_matrix.shape[1]
     fiducial = jnp.concatenate([jnp.ones(1), jnp.zeros(T - 1)])
-    linalg_theta = jax.vmap(
-        lambda f, i: fitting.fit_theta_by_linalg(
-            f, i, 0.0, design_matrix)[0])(flux_PN, ivar_PN)
+    linalg_theta = jax.lax.map(
+        lambda fi: fitting.fit_theta_by_linalg(
+            fi[0], fi[1], 0.0, design_matrix)[0],
+        (flux_PN, ivar_PN), batch_size=min(batch_size, P))
     finite = jnp.all(jnp.isfinite(linalg_theta), axis=1, keepdims=True)
     linalg_theta = jnp.where(finite, linalg_theta, fiducial[None, :])
     return jnp.stack(
@@ -871,9 +879,17 @@ class CannonModel(object):
             # Initial theta guesses for every pixel: a linear-algebra estimate
             # and the fiducial value. The regularized objective is convex, so
             # the optimum is independent of the starting point; these only set
-            # where the optimizer begins.
+            # where the optimizer begins. The estimate is chunked over pixels so
+            # its peak working set -- the (S, T) design-times-ivar products and
+            # the (T, T) Gram/inverse formed per pixel -- stays within the same
+            # memory budget as the main fitting loop instead of materializing the
+            # full (P, S, T) stack in one vmap.
+            init_per_pixel_bytes = 8 * (S * T + 2 * T * T)
+            init_batch_size = max(1, int(_TRAIN_BATCH_MEM_BYTES
+                                         // init_per_pixel_bytes))
             init_stack = _initial_theta_stack(
-                flux_PN, ivar_PN, design_matrix)                 # (P, 2, T)
+                flux_PN, ivar_PN, design_matrix,
+                batch_size=init_batch_size)                      # (P, 2, T)
 
             if eiv:
                 fitter = fitting.make_pixel_fitter_eiv(
