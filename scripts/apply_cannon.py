@@ -186,7 +186,11 @@ def train_and_apply(label_source, normalized_flux, normalized_ivar, dispersion,
     predicted = np.asarray(predicted)
     cov = np.asarray(cov)
     # Formal per-label uncertainties are the sqrt of the covariance diagonal.
-    sigma = np.sqrt(np.clip(np.einsum("sii->si", cov), 0, None))
+    # `test` returns `cov` in the *scaled* label basis (fitting.py optimizes
+    # scaled params) while `predicted` is in physical units, so rescale the
+    # errors to physical units too: sigma_phys = scales * sigma_scaled.
+    scales = np.asarray(model._scales)                     # (L,)
+    sigma = np.sqrt(np.clip(np.einsum("sii->si", cov), 0, None)) * scales
 
     # --- Assemble the catalogue -----------------------------------------
     columns = {}
