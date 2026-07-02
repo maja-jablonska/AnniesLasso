@@ -262,27 +262,22 @@ def _run_real(args, config):
 
 def _run_demo(args, config):
     """ Smoke test on the bundled (already-normalized) golden data. """
-    import pickle
     import pandas as pd
+    try:
+        from scripts.sweep_config import load_golden
+    except ImportError:
+        from sweep_config import load_golden
 
-    golden_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..", "thecannon", "tests", "golden", "golden.pkl")
-    with open(golden_path, "rb") as fp:
-        meta = pickle.load(fp)["meta"]
-
-    names = list(meta["label_names"])
-    label_array = np.atleast_2d(np.asarray(meta["labels"], dtype=float))
-    label_source = pd.DataFrame(
-        {name: label_array[:, i] for i, name in enumerate(names)})
+    names, labels, dispersion, flux, ivar = load_golden()
+    label_source = pd.DataFrame(labels)
 
     # The golden set has no quality columns; train on all of it.
     config = dict(config, labels=names, quality_cut=False, train_frac=1.0)
     print("Demo on golden data: {0} stars, {1} pixels, labels {2}".format(
-        meta["flux"].shape[0], meta["flux"].shape[1], names))
+        flux.shape[0], flux.shape[1], names))
 
     return train_and_apply(
-        label_source, meta["flux"], meta["ivar"], meta["dispersion"], config,
+        label_source, flux, ivar, dispersion, config,
         output_dir=args.output_dir, save_model=args.save_model,
         test_batch_size=args.test_batch_size)
 

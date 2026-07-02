@@ -645,23 +645,16 @@ def _write_csv(rows, path):
 
 def _demo(wandb_project=None, wandb_mode="offline"):
     """ Run a tiny sweep on the bundled golden data to verify the pipeline. """
-    import os
-    import pickle
+    try:
+        from scripts.sweep_config import load_golden
+    except ImportError:
+        from sweep_config import load_golden
 
-    golden_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..", "thecannon", "tests", "golden", "golden.pkl")
-
-    if os.path.exists(golden_path):
-        with open(golden_path, "rb") as fp:
-            meta = pickle.load(fp)["meta"]
-        names = list(meta["label_names"])
-        label_array = np.atleast_2d(np.asarray(meta["labels"], dtype=float))
-        labels = {name: label_array[:, i] for i, name in enumerate(names)}
-        flux, ivar, dispersion = meta["flux"], meta["ivar"], meta["dispersion"]
+    try:
+        names, labels, dispersion, flux, ivar = load_golden()
         print("Loaded golden data: {0} stars, {1} pixels, labels {2}".format(
             flux.shape[0], flux.shape[1], names))
-    else:
+    except (OSError, IOError, KeyError):
         print("Golden data not found; synthesizing a toy data set.")
         rng = np.random.default_rng(0)
         names = ["A", "B", "C"]

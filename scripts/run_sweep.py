@@ -46,10 +46,12 @@ try:
                                        quality_mask, DEFAULT_DATA_DIR,
                                        DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
+    from scripts.sweep_config import add_label_builder_args, load_golden
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_LABELS)
     from sweep_cannon import sweep
+    from sweep_config import add_label_builder_args, load_golden
 
 logger = logging.getLogger("thecannon.run_sweep")
 
@@ -168,30 +170,7 @@ def main():
     parser.add_argument("--continuum-list",
                         default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
                         help="text file of continuum pixel indices")
-    parser.add_argument("--base", type=lambda s: s.split(","),
-                        default=["raw_teff", "raw_logg", "raw_fe_h", "mg_fe"],
-                        help="comma-separated core labels in every set (the age "
-                             "column from --age-cols is appended to this)")
-    parser.add_argument("--age-cols", type=lambda s: s.split(","),
-                        default=["age_Dnu", "age_L"],
-                        help="age column(s); each makes a separate base variant "
-                             "(missing columns are skipped)")
-    parser.add_argument("--mass-col", default="mass_L",
-                        help="mass column added by the 'age and mass' sets "
-                             "(empty string to disable)")
-    parser.add_argument("--abundances", type=lambda s: s.split(","),
-                        default=["ce_fe", "ca_fe", "si_fe", "ni_fe",
-                                 "mn_fe", "al_fe", "c_fe", "n_fe"],
-                        help="comma-separated abundances to test on top of base "
-                             "(the <x>_fe columns are derived from raw_<x>_h - "
-                             "raw_fe_h at load time)")
-    parser.add_argument("--label-set-mode", default="one-at-a-time",
-                        choices=["one-at-a-time", "cumulative", "minimal"],
-                        help="how extras are combined with each base")
-    parser.add_argument("--label-set", dest="label_sets", action="append",
-                        type=lambda s: tuple(s.split(",")), default=None,
-                        help="explicit label set to try (repeatable); overrides "
-                             "the builder when given")
+    add_label_builder_args(parser)
     parser.add_argument("--orders", type=lambda s: [int(x) for x in s.split(",")],
                         default=[1, 2], help="comma-separated polynomial orders")
     parser.add_argument("--regularizations",
@@ -229,18 +208,7 @@ def main():
         enable_jax_compilation_cache(args.jax_cache_dir)
 
     if args.demo:
-        import pickle
-        golden_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "thecannon", "tests", "golden", "golden.pkl")
-        with open(golden_path, "rb") as fp:
-            meta = pickle.load(fp)["meta"]
-        names = list(meta["label_names"])
-        arr = np.atleast_2d(np.asarray(meta["labels"], dtype=float))
-        label_source = {name: arr[:, i] for i, name in enumerate(names)}
-        dispersion = meta["dispersion"]
-        norm_flux, norm_ivar = meta["flux"], meta["ivar"]   # already normalized
-        labels_master = names
+        names, label_source, dispersion, norm_flux, norm_ivar = load_golden()
         label_sets = [tuple(names[:2]), tuple(names)]
         n_splits = min(args.n_splits, 3)
         print("Demo on golden data: {0} stars, {1} pixels, labels {2}".format(

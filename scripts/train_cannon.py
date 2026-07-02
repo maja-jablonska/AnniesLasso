@@ -327,23 +327,18 @@ def _run_real(args):
 
 def _run_demo(args):
     """ Smoke test on the bundled (already-normalized) golden data. """
-    import pickle
+    try:
+        from scripts.sweep_config import load_golden
+    except ImportError:
+        from sweep_config import load_golden
 
-    golden_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..", "thecannon", "tests", "golden", "golden.pkl")
-    with open(golden_path, "rb") as fp:
-        meta = pickle.load(fp)["meta"]
-
-    names = list(meta["label_names"])
-    label_array = np.atleast_2d(np.asarray(meta["labels"], dtype=float))
-    labels = {name: label_array[:, i] for i, name in enumerate(names)}
+    names, labels, dispersion, flux, ivar = load_golden()
     print("Demo on golden data: {0} stars, {1} pixels, labels {2}".format(
-        meta["flux"].shape[0], meta["flux"].shape[1], names))
+        flux.shape[0], flux.shape[1], names))
 
     # Golden flux is already normalized; use a 50/50 split given the small N.
     return run(
-        labels, meta["flux"], meta["ivar"], meta["dispersion"], names,
+        labels, flux, ivar, dispersion, names,
         order=args.order, regularization=args.regularization,
         train_frac=0.5, validate_frac=0.5, seed=args.seed,
         output_dir=args.output_dir, save_model=args.save_model,

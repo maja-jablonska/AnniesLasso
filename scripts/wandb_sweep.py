@@ -96,6 +96,13 @@ import time
 
 import numpy as np
 
+# Lightweight shared config (stdlib + numpy only, no science stack) -- safe to
+# import at module top even for the network-light controller role.
+try:
+    from scripts.sweep_config import add_label_builder_args, load_golden
+except ImportError:
+    from sweep_config import add_label_builder_args, load_golden
+
 logger = logging.getLogger("thecannon.wandb_sweep")
 
 # Task/result files are keyed by the trial id; tmp siblings are hidden dotfiles
@@ -455,17 +462,7 @@ def _load_data(args):
                               finite_label_mapping)
 
     if args.demo:
-        import pickle
-        golden_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "thecannon", "tests", "golden", "golden.pkl")
-        with open(golden_path, "rb") as fp:
-            meta = pickle.load(fp)["meta"]
-        names = list(meta["label_names"])
-        arr = np.atleast_2d(np.asarray(meta["labels"], dtype=float))
-        label_source = {name: arr[:, i] for i, name in enumerate(names)}
-        dispersion = meta["dispersion"]
-        flux, ivar = meta["flux"], meta["ivar"]          # already normalized
+        names, label_source, dispersion, flux, ivar = load_golden()
         label_sets = [tuple(names[:2]), tuple(names)]
         n_splits = min(args.n_splits, 3)
         print("Demo on golden data: {0} stars, {1} pixels, labels {2}".format(
@@ -554,19 +551,7 @@ def main():
                         help="parquet table of spectra + labels")
     parser.add_argument("--continuum-list", default=None,
                         help="text file of continuum pixel indices")
-    parser.add_argument("--base", type=lambda s: s.split(","),
-                        default=["raw_teff", "raw_logg", "raw_fe_h", "mg_fe"])
-    parser.add_argument("--age-cols", type=lambda s: s.split(","),
-                        default=["age_Dnu", "age_L"])
-    parser.add_argument("--mass-col", default="mass_L")
-    parser.add_argument("--abundances", type=lambda s: s.split(","),
-                        default=["ce_fe", "ca_fe", "si_fe", "ni_fe",
-                                 "mn_fe", "al_fe", "c_fe", "n_fe"])
-    parser.add_argument("--label-set-mode", default="one-at-a-time",
-                        choices=["one-at-a-time", "cumulative", "minimal"])
-    parser.add_argument("--label-set", dest="label_sets", action="append",
-                        type=lambda s: tuple(s.split(",")), default=None,
-                        help="explicit label set (repeatable); overrides builder")
+    add_label_builder_args(parser)
     # Search space.
     parser.add_argument("--orders", type=lambda s: [int(x) for x in s.split(",")],
                         default=[1, 2])

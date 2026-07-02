@@ -83,11 +83,13 @@ try:
                                        quality_mask, DEFAULT_DATA_DIR)
     from scripts.run_sweep import finite_label_mapping
     from scripts.sweep_cannon import _label_matrix, cross_validate, _summarize
+    from scripts.sweep_config import DEFAULT_ABUNDANCES, load_golden
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR)
     from run_sweep import finite_label_mapping
     from sweep_cannon import _label_matrix, cross_validate, _summarize
+    from sweep_config import DEFAULT_ABUNDANCES, load_golden
 
 logger = logging.getLogger("thecannon.select_labels")
 
@@ -287,18 +289,9 @@ def load(args):
     union = list(dict.fromkeys(core + candidates))
 
     if args.demo:
-        import pickle
-        golden_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "thecannon", "tests", "golden", "golden.pkl")
-        with open(golden_path, "rb") as fp:
-            meta = pickle.load(fp)["meta"]
-        names = list(meta["label_names"])
-        arr = np.atleast_2d(np.asarray(meta["labels"], dtype=float))
-        label_source = {name: arr[:, i] for i, name in enumerate(names)}
-        dispersion, flux, ivar = meta["dispersion"], meta["flux"], meta["ivar"]
-        print("Demo on golden data: {0} stars, {1} pixels, labels {2}".format(
-            flux.shape[0], flux.shape[1], names))
+        _, label_source, dispersion, flux, ivar = load_golden()
+        print("Demo on golden data: {0} stars, {1} pixels".format(
+            flux.shape[0], flux.shape[1]))
     else:
         label_source, dispersion, flux, ivar = load_spectra(args.spectra)
         good = quality_mask(label_source)
@@ -364,8 +357,7 @@ def main():
                         default=["raw_teff", "raw_logg", "raw_fe_h"],
                         help="labels always included")
     parser.add_argument("--candidates", type=lambda s: s.split(","),
-                        default=["mg_fe", "ce_fe", "ca_fe", "si_fe", "ni_fe",
-                                 "mn_fe", "al_fe", "c_fe", "n_fe"],
+                        default=["mg_fe"] + list(DEFAULT_ABUNDANCES),
                         help="candidate columns to select from")
     parser.add_argument("--target", default=None,
                         help="optimize this label's r2 (pinned into the core)")
