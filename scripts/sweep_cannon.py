@@ -9,9 +9,14 @@ polynomial order of the vectorizer, the L1 regularization strength, and
 (optionally) pixel censoring -- and scores each combination by k-fold
 cross-validation. For every grid point it trains on the training folds, runs the
 test step on the held-out fold, and reports how well the held-out labels are
-recovered (bias and scatter against the reference labels) together with the
-median reduced chi-squared and the fraction of held-out stars that fall inside
-the convex hull of the training labels.
+recovered. For every label it records the classical (mean/std) and robust
+(median/MAD) bias and scatter, the catastrophic-outlier fraction, a
+dimensionless ``r2`` goodness score, and the uncertainty-calibration "pull"
+statistics (residual / formal error). These are summarized per grid point by
+``mean_r2`` (the recommended, unit-free ranking key), ``mean_sigma_mad`` and
+``mean_pull_std``, alongside the median reduced chi-squared, the fraction of
+held-out stars inside the convex hull of the training labels, and the trained
+model's complexity (``theta_frac_zero`` L1 sparsity and ``median_s2``).
 
 The same fold assignment (fixed RNG seed) is reused for every grid point so the
 comparison between hyper-parameters is not confounded by split noise.
@@ -137,14 +142,22 @@ def cross_validate(label_array, flux, ivar, dispersion, label_names, order,
         A :class:`thecannon.censoring.Censors` object (or ``None``).
 
     :returns:
-        A dict of held-out arrays: ``recovered`` ``(N, K)``, ``residual``
-        ``(N, K)``, ``r_chi_sq`` ``(N,)`` and ``in_hull`` ``(N,)``.
+        A dict of held-out arrays -- ``recovered`` ``(N, K)``, ``reference``
+        ``(N, K)``, ``residual`` ``(N, K)``, ``formal_err`` ``(N, K)`` (the
+        model's own per-label 1-sigma uncertainties), ``r_chi_sq`` ``(N,)`` and
+        ``in_hull`` ``(N,)`` -- plus the fold-averaged model-complexity scalars
+        ``theta_frac_zero`` and ``median_s2``.
     """
 
     N, K = label_array.shape
     recovered = np.full((N, K), np.nan, dtype=float)
+    formal_err = np.full((N, K), np.nan, dtype=float)
     r_chi_sq = np.full(N, np.nan, dtype=float)
     in_hull = np.zeros(N, dtype=bool)
+
+    # Model-complexity diagnostics are per-fold properties of the trained model;
+    # collect them and average across folds.
+    theta_frac_zero, median_s2 = [], []
 
     # One vectorizer for every fold (it is stateless), and no per-fold progress
     # bars: tqdm host callbacks get baked into the compiled scan, which would
@@ -161,10 +174,30 @@ def cross_validate(label_array, flux, ivar, dispersion, label_names, order,
             censors=censors)
         model.train(**train_kwds)
 
-        op_labels, _, meta = model.test(
+        # Record the trained model's complexity: the L1 sparsity (fraction of
+        # theta coefficients driven to zero) and the learned intrinsic pixel
+        # scatter, so the regularization axis of the sweep is interpretable.
+        theta = np.asarray(model.theta)
+        theta_frac_zero.append(float(np.mean(np.abs(theta) < 1e-12)))
+        median_s2.append(float(np.nanmedian(model.s2)))
+
+        # Keep the covariance: its diagonal is the model's formal per-label
+        # variance, which powers the uncertainty-calibration ("pull") metrics.
+        # NOTE: `test` optimizes in the *scaled* label basis and returns `cov`
+        # there (fitting.py: cov = inv(J^T J) with J wrt scaled params), while
+        # `op_labels` is converted back to physical units. Rescale the formal
+        # errors to physical units too (sigma_phys = scales * sigma_scaled) so
+        # they are commensurate with the residuals; without this the pull is
+        # inflated by ~scales (e.g. hundreds for TEFF).
+        op_labels, cov, meta = model.test(
             flux[test_idx], ivar[test_idx], **test_kwds)
+        scales = np.asarray(model._scales)                 # (L,)
 
         recovered[test_idx] = op_labels
+        with np.errstate(invalid="ignore"):
+            sigma_scaled = np.sqrt(
+                np.clip(np.einsum("sii->si", np.asarray(cov)), 0.0, None))
+            formal_err[test_idx] = sigma_scaled * scales
         r_chi_sq[test_idx] = [m["r_chi_sq"] for m in meta]
 
         # Convex-hull membership flags held-out stars that require extrapolation
@@ -175,24 +208,92 @@ def cross_validate(label_array, flux, ivar, dispersion, label_names, order,
             logger.debug("convex-hull test skipped: %s", exc)
             in_hull[test_idx] = False
 
-    return dict(recovered=recovered, residual=recovered - label_array,
-                r_chi_sq=r_chi_sq, in_hull=in_hull)
+    return dict(recovered=recovered, reference=label_array,
+                residual=recovered - label_array, formal_err=formal_err,
+                r_chi_sq=r_chi_sq, in_hull=in_hull,
+                theta_frac_zero=float(np.mean(theta_frac_zero)),
+                median_s2=float(np.mean(median_s2)))
 
 
-def _summarize(cv, label_names):
-    """ Reduce the per-star cross-validation arrays to a tidy metric row. """
+def _summarize(cv, label_names, catastrophic_nsigma=5.0):
+    """
+    Reduce the per-star cross-validation arrays to a tidy metric row.
+
+    For every label this reports both the classical (mean/std) and robust
+    (median/MAD) bias and scatter, the catastrophic-outlier fraction (residuals
+    beyond ``catastrophic_nsigma`` robust sigma), a dimensionless goodness score
+    ``r2`` (explained variance), and -- when formal errors are available -- the
+    uncertainty-calibration "pull" statistics (residual / formal error; mean ~0
+    and std ~1 for a well-calibrated model). Aggregates and the fold-averaged
+    model-complexity scalars round out the row.
+    """
     residual = cv["residual"]
+    reference = cv.get("reference")
+    formal_err = cv.get("formal_err")
     row = {}
-    scatters = []
+    scatters, sigma_mads, r2s, pull_stds = [], [], [], []
+
     for i, name in enumerate(label_names):
         r = residual[:, i]
+
+        # --- classical (mean / std) ---
         row["bias_{0}".format(name)] = float(np.nanmean(r))
         row["scatter_{0}".format(name)] = float(np.nanstd(r))
         row["rmse_{0}".format(name)] = float(np.sqrt(np.nanmean(r ** 2)))
         scatters.append(row["scatter_{0}".format(name)])
-    row["mean_scatter"] = float(np.mean(scatters))
+
+        # --- robust (median / MAD), immune to catastrophic failures ---
+        med = float(np.nanmedian(r))
+        mad = float(1.4826 * np.nanmedian(np.abs(r - med)))
+        row["median_bias_{0}".format(name)] = med
+        row["sigma_mad_{0}".format(name)] = mad
+        row["frac_catastrophic_{0}".format(name)] = (
+            float(np.nanmean(np.abs(r - med) > catastrophic_nsigma * mad))
+            if mad > 0 else 0.0)
+        sigma_mads.append(mad)
+
+        # --- dimensionless goodness (R^2 = explained variance) ---
+        if reference is not None:
+            ref = reference[:, i]
+            good = np.isfinite(r) & np.isfinite(ref)
+            ss_tot = float(np.sum((ref[good] - np.mean(ref[good])) ** 2)) \
+                if good.sum() > 1 else 0.0
+            r2 = float(1.0 - np.sum(r[good] ** 2) / ss_tot) \
+                if ss_tot > 0 else float("nan")
+        else:
+            r2 = float("nan")
+        row["r2_{0}".format(name)] = r2
+        r2s.append(r2)
+
+        # --- uncertainty calibration (pull = residual / formal error) ---
+        if formal_err is not None:
+            fe = formal_err[:, i]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                pull = np.where(fe > 0, r / fe, np.nan)
+            row["pull_mean_{0}".format(name)] = float(np.nanmean(pull))
+            pull_std = float(np.nanstd(pull))
+            row["pull_std_{0}".format(name)] = pull_std
+            med_fe = float(np.nanmedian(fe))
+            row["err_ratio_{0}".format(name)] = (
+                row["scatter_{0}".format(name)] / med_fe
+                if med_fe > 0 else float("nan"))
+            pull_stds.append(pull_std)
+
+    # --- aggregates ---
+    row["mean_scatter"] = float(np.mean(scatters))       # kept for continuity
+    row["mean_sigma_mad"] = float(np.mean(sigma_mads))   # robust analogue
+    row["mean_r2"] = float(np.nanmean(r2s))              # recommended ranking key
+    if pull_stds:
+        row["mean_pull_std"] = float(np.nanmean(pull_stds))
     row["median_r_chi_sq"] = float(np.nanmedian(cv["r_chi_sq"]))
     row["frac_in_hull"] = float(np.mean(cv["in_hull"]))
+
+    # --- model complexity (fold-averaged) ---
+    if "theta_frac_zero" in cv:
+        row["theta_frac_zero"] = float(cv["theta_frac_zero"])
+    if "median_s2" in cv:
+        row["median_s2"] = float(cv["median_s2"])
+
     row["n_test"] = int(np.sum(np.isfinite(cv["recovered"][:, 0])))
     return row
 
@@ -229,6 +330,7 @@ def _log_wandb_run(run, row, cv, label_names):
 
     if cv is not None:
         residual = cv["residual"]
+        formal_err = cv.get("formal_err")
         for i, name in enumerate(label_names):
             finite = residual[:, i][np.isfinite(residual[:, i])]
             if finite.size:
@@ -237,6 +339,19 @@ def _log_wandb_run(run, row, cv, label_names):
                         wandb.Histogram(finite)
                 except Exception:                      # pragma: no cover
                     pass
+            # The pull distribution should be ~unit-Gaussian if the model's
+            # formal errors are well calibrated; a histogram makes that visible.
+            if formal_err is not None:
+                fe = formal_err[:, i]
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    pull = np.where(fe > 0, residual[:, i] / fe, np.nan)
+                pull = pull[np.isfinite(pull)]
+                if pull.size:
+                    try:
+                        metrics["pull_hist/{0}".format(name)] = \
+                            wandb.Histogram(pull)
+                    except Exception:                  # pragma: no cover
+                        pass
 
     run.log(metrics)
     run.summary["status"] = row.get("status", "ok")
@@ -465,9 +580,11 @@ def sweep(labels, flux, ivar, dispersion, label_sets, orders, regularizations,
             row["status"] = "ok"
             logger.info(
                 "[%d/%d] %s order=%d reg=%g censor=%s -> "
-                "mean_scatter=%.4f r_chi_sq=%.2f", n, len(grid),
-                row["label_set"], order, reg, censor_name,
-                row["mean_scatter"], row["median_r_chi_sq"])
+                "mean_r2=%.4f mean_sigma_mad=%.4f pull_std=%.2f r_chi_sq=%.2f",
+                n, len(grid), row["label_set"], order, reg, censor_name,
+                row["mean_r2"], row["mean_sigma_mad"],
+                row.get("mean_pull_std", float("nan")),
+                row["median_r_chi_sq"])
 
             # Per-run figure: the spread (recovered vs reference) for all labels.
             if run is not None:
@@ -573,7 +690,9 @@ def _demo(wandb_project=None, wandb_mode="offline"):
     try:
         import pandas as pd  # noqa: F401
         cols = ["label_set", "order", "regularization", "censor",
-                "mean_scatter", "median_r_chi_sq", "frac_in_hull", "status"]
+                "mean_r2", "mean_sigma_mad", "mean_pull_std",
+                "median_r_chi_sq", "theta_frac_zero", "frac_in_hull", "status"]
+        cols = [c for c in cols if c in results.columns]
         print(results[cols].to_string(index=False))
     except ImportError:
         for row in results:
