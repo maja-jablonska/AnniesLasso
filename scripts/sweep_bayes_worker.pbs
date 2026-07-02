@@ -1,0 +1,70 @@
+#!/bin/bash
+# ===========================================================================
+#  Bayesian Cannon sweep -- WORKER job (compute queue, no internet).
+#
+#  Runs scripts/wandb_sweep.py in --role worker: it loads + normalizes the
+#  spectra once, then polls a shared-filesystem broker directory for tasks that
+#  the controller (running on copyq, which has internet) drops there. For each
+#  task it cross-validates one Cannon model and writes the metrics back to the
+#  broker. The worker never touches the network, so it can run on `normal` /
+#  `gpuvolta` where the Bayesian controller cannot.
+#
+#  Launch this AND scripts/sweep_bayes_controller.pbs, both pointing at the same
+#  $BROKER on shared scratch. The worker exits when the controller drops a STOP
+#  file (the controller job does this on exit), after --worker-idle-timeout
+#  seconds without work, or when this job's walltime ends.
+#
+#  You can run several workers against one broker for parallel trials -- just
+#  submit this script more than once.
+#
+#  Submit with:   qsub -v BROKER=/scratch/PROJ/cannon-bayes-broker scripts/sweep_bayes_worker.pbs
+# ===========================================================================
+#PBS -N cannon-bayes-worker
+#PBS -P REPLACE_WITH_PROJECT
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=64GB
+#PBS -l walltime=08:00:00
+#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration ---------------------------------------------------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to the Python interpreter (conda/venv) with thecannon installed.
+PYTHON_BIN="python"
+# Shared broker directory -- MUST match the controller's. Override via `qsub -v`.
+BROKER="${BROKER:-/scratch/REPLACE_WITH_PROJECT/cannon-bayes-broker}"
+# Data (defaults point at the bulge-ages-and-orbits set); or pass --demo below.
+SPECTRA="/path/to/cleaned_ages.parquet"
+CONTINUUM_LIST="/path/to/continuum.list"
+N_SPLITS=5
+SEED=0
+# Exit if no task arrives for this long (safety net if the controller dies
+# without writing STOP). Must exceed the controller's between-trial gap.
+IDLE_TIMEOUT=1800
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+mkdir -p "${BROKER}"
+
+# CPU queue: keep JAX on CPU. On gpuvolta, drop this line (and use -q gpuvolta
+# / -l ngpus=1) so the test/train steps use the GPU.
+export JAX_PLATFORMS=cpu
+
+echo "[$(date)] worker starting on $(hostname); broker=${BROKER}"
+
+${PYTHON_BIN} -m scripts.wandb_sweep --role worker \
+    --broker "${BROKER}" \
+    --spectra "${SPECTRA}" \
+    --continuum-list "${CONTINUUM_LIST}" \
+    --n-splits "${N_SPLITS}" \
+    --seed "${SEED}" \
+    --worker-idle-timeout "${IDLE_TIMEOUT}" \
+    -v
+rc=$?
+
+echo "[$(date)] worker finished with exit code ${rc}"
+exit ${rc}

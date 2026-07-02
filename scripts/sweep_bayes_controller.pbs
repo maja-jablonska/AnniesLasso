@@ -1,0 +1,88 @@
+#!/bin/bash
+# ===========================================================================
+#  Bayesian Cannon sweep -- CONTROLLER job (copyq, online).
+#
+#  Runs scripts/wandb_sweep.py in --role controller on the NCI Gadi `copyq`
+#  queue, which -- unlike the compute queues -- has outbound internet. It creates
+#  (or attaches to) a W&B Bayesian sweep and runs a *brokering* agent: for each
+#  point the W&B optimizer proposes, it drops a task in the shared $BROKER,
+#  waits for a worker (running scripts/sweep_bayes_worker.pbs on a compute node)
+#  to return the metrics, and logs them back so the optimizer picks the next
+#  point. No heavy compute happens here -- the agent is network- and CPU-light.
+#
+#  Bayesian search is a closed loop, so this MUST run online (offline+sync would
+#  make bayes degenerate to random). Authenticate first: run `wandb login` once
+#  on a login node (writes ~/.netrc, which copyq can read) or export
+#  WANDB_API_KEY before submitting.
+#
+#  Launch this AND scripts/sweep_bayes_worker.pbs with the SAME $BROKER. copyq
+#  walltime is capped (~10 h); to run longer, resubmit against the same sweep
+#  with --sweep-id "$(cat $BROKER/sweep_id.txt)".
+#
+#  Submit with:   qsub -v BROKER=/scratch/PROJ/cannon-bayes-broker scripts/sweep_bayes_controller.pbs
+# ===========================================================================
+#PBS -N cannon-bayes-controller
+#PBS -P REPLACE_WITH_PROJECT
+#PBS -q copyq
+#PBS -l ncpus=1
+#PBS -l mem=8GB
+#PBS -l walltime=10:00:00
+#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration ---------------------------------------------------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+PYTHON_BIN="python"
+BROKER="${BROKER:-/scratch/REPLACE_WITH_PROJECT/cannon-bayes-broker}"
+WANDB_PROJECT="cannon-bayes"
+COUNT=40                       # trials this controller session runs
+METRIC="mean_r2"
+GOAL="maximize"
+# Candidate label sets (repeat --label-set). Explicit here so the controller
+# needs no data; alternatively omit them and it will read the worker-published
+# $BROKER/label_sets.json.
+LABEL_SETS=(
+    "raw_teff,raw_logg,raw_fe_h"
+    "raw_teff,raw_logg,raw_fe_h,mg_fe"
+    "raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe"
+)
+ORDERS="1,2"
+REG_MIN="1e0"
+REG_MAX="1e5"
+# Attach to an existing sweep to continue a previous copyq session (else empty).
+SWEEP_ID="${SWEEP_ID:-}"
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+mkdir -p "${BROKER}"
+
+export WANDB_MODE=online
+
+label_args=()
+for ls in "${LABEL_SETS[@]}"; do label_args+=(--label-set "${ls}"); done
+
+sweep_id_arg=()
+[ -n "${SWEEP_ID}" ] && sweep_id_arg=(--sweep-id "${SWEEP_ID}")
+
+echo "[$(date)] controller starting on $(hostname); broker=${BROKER}"
+
+${PYTHON_BIN} -m scripts.wandb_sweep --role controller \
+    --broker "${BROKER}" \
+    --wandb-project "${WANDB_PROJECT}" \
+    --method bayes --metric "${METRIC}" --goal "${GOAL}" \
+    --count "${COUNT}" \
+    "${label_args[@]}" \
+    --orders "${ORDERS}" --reg-min "${REG_MIN}" --reg-max "${REG_MAX}" \
+    "${sweep_id_arg[@]}" \
+    -v
+rc=$?
+echo "[$(date)] controller finished with exit code ${rc}"
+
+# Signal the worker(s) to shut down cleanly now that the search is done.
+echo "[$(date)] writing STOP to ${BROKER}"
+touch "${BROKER}/STOP"
+
+exit ${rc}
