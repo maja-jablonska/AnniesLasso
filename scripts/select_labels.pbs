@@ -1,0 +1,75 @@
+#!/bin/bash
+# ===========================================================================
+#  Cannon label-column selection -- PBS job (compute queue).
+#
+#  Runs scripts/select_labels.py, which cross-validates label-column
+#  combinations. Defaults to --mode screen (ablation: the core alone vs core +
+#  each single candidate, reporting each column's marginal effect). This is pure
+#  compute -- no internet or W&B -- so it runs on `normal` and just writes a CSV;
+#  no copyq sync is needed (unlike scripts/sweep.pbs).
+#
+#  Override MODE=forward or MODE=subsets to run the other strategies, and
+#  TARGET=<label> to optimize one label's r2 (else the objective is mean_r2).
+#
+#  Submit with:   qsub scripts/select_labels.pbs
+#  or override:   qsub -v MODE=forward,TARGET=age_L,OUTPUT=$PWD/sel.csv scripts/select_labels.pbs
+# ===========================================================================
+#PBS -N cannon-select-labels
+#PBS -P REPLACE_WITH_PROJECT
+#PBS -q normal
+#PBS -l ncpus=16
+#PBS -l mem=64GB
+#PBS -l walltime=02:00:00
+#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to the Python interpreter (conda/venv) with thecannon installed.
+PYTHON_BIN="${PYTHON_BIN:-python}"
+# Data.
+SPECTRA="${SPECTRA:-/path/to/cleaned_ages.parquet}"
+CONTINUUM_LIST="${CONTINUUM_LIST:-/path/to/continuum.list}"
+# Selection setup.
+MODE="${MODE:-screen}"                       # screen | forward | subsets
+CORE="${CORE:-raw_teff,raw_logg,raw_fe_h}"
+CANDIDATES="${CANDIDATES:-mg_fe,ce_fe,ca_fe,si_fe,ni_fe,mn_fe,al_fe,c_fe,n_fe}"
+TARGET="${TARGET:-}"                          # optimize r2_<TARGET>; empty = mean_r2
+ORDER="${ORDER:-2}"                           # order held fixed during selection
+REGULARIZATION="${REGULARIZATION:-0}"
+N_SPLITS="${N_SPLITS:-5}"
+SEED="${SEED:-0}"
+OUTPUT="${OUTPUT:-${PROJECT_DIR}/label_selection_${MODE}.csv}"
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+# Compute queue: keep JAX on CPU. On gpuvolta, drop this and use -q gpuvolta /
+# -l ngpus=1 so the train/test steps use the GPU.
+export JAX_PLATFORMS=cpu
+
+target_arg=()
+[ -n "${TARGET}" ] && target_arg=(--target "${TARGET}")
+
+echo "[$(date)] starting label selection (mode=${MODE}) on $(hostname)"
+
+${PYTHON_BIN} -m scripts.select_labels \
+    --mode "${MODE}" \
+    --spectra "${SPECTRA}" \
+    --continuum-list "${CONTINUUM_LIST}" \
+    --core "${CORE}" \
+    --candidates "${CANDIDATES}" \
+    "${target_arg[@]}" \
+    --order "${ORDER}" \
+    --regularization "${REGULARIZATION}" \
+    --n-splits "${N_SPLITS}" \
+    --seed "${SEED}" \
+    --output "${OUTPUT}" \
+    -v
+rc=$?
+
+echo "[$(date)] label selection finished with exit code ${rc}; wrote ${OUTPUT}"
+exit ${rc}
