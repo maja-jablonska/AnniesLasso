@@ -19,13 +19,13 @@
 #  Submit with:   qsub scripts/sweep_gpu.pbs
 # ===========================================================================
 #PBS -N cannon-sweep-gpu
-#PBS -P REPLACE_WITH_PROJECT
+#PBS -P mk27
 #PBS -q gpuvolta
 #PBS -l ngpus=1
 #PBS -l ncpus=12
 #PBS -l mem=95GB
 #PBS -l walltime=04:00:00
-#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l storage=scratch/mk27+gdata/mk27
 #PBS -l wd
 #PBS -j oe
 

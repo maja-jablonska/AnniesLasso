@@ -22,12 +22,12 @@
 #  Submit with:   qsub -v BROKER=/scratch/PROJ/cannon-bayes-broker scripts/sweep_bayes_controller.pbs
 # ===========================================================================
 #PBS -N cannon-bayes-controller
-#PBS -P REPLACE_WITH_PROJECT
+#PBS -P mk27
 #PBS -q copyq
 #PBS -l ncpus=1
 #PBS -l mem=8GB
 #PBS -l walltime=10:00:00
-#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l storage=scratch/mk27+gdata/mk27
 #PBS -l wd
 #PBS -j oe
 
@@ -36,7 +36,7 @@ set -uo pipefail
 # ---- user configuration ---------------------------------------------------
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 PYTHON_BIN="python"
-BROKER="${BROKER:-/scratch/REPLACE_WITH_PROJECT/cannon-bayes-broker}"
+BROKER="${BROKER:-/scratch/mk27/cannon-bayes-broker}"
 WANDB_PROJECT="cannon-bayes"
 COUNT=40                       # trials this controller session runs
 METRIC="mean_r2"

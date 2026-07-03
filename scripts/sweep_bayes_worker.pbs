@@ -20,12 +20,12 @@
 #  Submit with:   qsub -v BROKER=/scratch/PROJ/cannon-bayes-broker scripts/sweep_bayes_worker.pbs
 # ===========================================================================
 #PBS -N cannon-bayes-worker
-#PBS -P REPLACE_WITH_PROJECT
-#PBS -q normal
+#PBS -P mk27
+#PBS -q rsaa
 #PBS -l ncpus=16
 #PBS -l mem=64GB
 #PBS -l walltime=08:00:00
-#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l storage=scratch/mk27+gdata/mk27
 #PBS -l wd
 #PBS -j oe
 
@@ -36,10 +36,10 @@ PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 # Absolute path to the Python interpreter (conda/venv) with thecannon installed.
 PYTHON_BIN="python"
 # Shared broker directory -- MUST match the controller's. Override via `qsub -v`.
-BROKER="${BROKER:-/scratch/REPLACE_WITH_PROJECT/cannon-bayes-broker}"
+BROKER="${BROKER:-/scratch/mk27/cannon-bayes-broker}"
 # Data (defaults point at the bulge-ages-and-orbits set); or pass --demo below.
-SPECTRA="/path/to/cleaned_ages.parquet"
-CONTINUUM_LIST="/path/to/continuum.list"
+SPECTRA="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/cleaned_ages.parquet"
+CONTINUUM_LIST="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list"
 N_SPLITS=5
 SEED=0
 # Exit if no task arrives for this long (safety net if the controller dies

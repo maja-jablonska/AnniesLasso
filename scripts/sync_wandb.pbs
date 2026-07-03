@@ -15,12 +15,12 @@
 #     qsub -v WANDB_DIR=$PWD/wandb scripts/sync_wandb.pbs
 # ===========================================================================
 #PBS -N cannon-wandb-sync
-#PBS -P REPLACE_WITH_PROJECT
+#PBS -P mk27
 #PBS -q copyq
 #PBS -l ncpus=1
 #PBS -l mem=8GB
 #PBS -l walltime=02:00:00
-#PBS -l storage=scratch/REPLACE_WITH_PROJECT+gdata/REPLACE_WITH_PROJECT
+#PBS -l storage=scratch/mk27+gdata/mk27
 #PBS -l wd
 #PBS -j oe
 
