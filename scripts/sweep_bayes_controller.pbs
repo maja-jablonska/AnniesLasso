@@ -38,7 +38,8 @@ PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 PYTHON_BIN="/scratch/y89/mj8805/miniforge/envs/astro/bin/python"
 BROKER="${BROKER:-/scratch/mk27/cannon-bayes-broker}"
 WANDB_PROJECT="cannon-bayes"
-COUNT=40                       # trials this controller session runs
+COUNT=200                      # trials this session; ~20 label sets x 2 orders,
+                               # so give bayes several evals per (set, order)
 METRIC="mean_r2"
 GOAL="maximize"
 # Candidate label sets, built one-abundance-at-a-time from CORE x AGE_COLS x

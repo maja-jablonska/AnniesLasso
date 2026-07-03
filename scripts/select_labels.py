@@ -309,10 +309,23 @@ def load(args):
         flux, ivar = normalize_spectra(dispersion, flux, ivar,
                                        args.continuum_list)
 
-    missing = [n for n in union
-               if not (n in getattr(label_source, "columns", label_source))]
-    if missing:
-        raise ValueError("columns not in the data: {0}".format(missing))
+    def _has(name):
+        cols = getattr(label_source, "columns", None)
+        return (name in cols) if cols is not None else (name in label_source)
+
+    # Core columns must exist; missing candidates are dropped (with a warning) so
+    # a big speculative pool can be screened against whatever the parquet has.
+    missing_core = [n for n in core if not _has(n)]
+    if missing_core:
+        raise ValueError("core columns not in the data: {0}".format(missing_core))
+    dropped = [c for c in candidates if not _has(c)]
+    if dropped:
+        logger.warning("dropping %d candidate(s) not in the data: %s",
+                       len(dropped), ", ".join(dropped))
+        candidates = [c for c in candidates if _has(c)]
+    if not candidates:
+        raise ValueError("no candidate columns are present in the data")
+    union = list(dict.fromkeys(core + candidates))
 
     # One finite mask over EVERY referenced column, so all label sets are scored
     # on identical stars (a fair comparison, at the cost of some dropped stars).
