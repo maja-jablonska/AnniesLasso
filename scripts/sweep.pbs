@@ -19,9 +19,11 @@
 #PBS -l ncpus=16
 #PBS -l mem=64GB
 #PBS -l walltime=04:00:00
-#PBS -l storage=scratch/mk27+gdata/mk27
+#PBS -l storage=scratch/mk27+scratch/y89
 #PBS -l wd
 #PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
 
 set -uo pipefail
 
@@ -29,7 +31,7 @@ set -uo pipefail
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 # Absolute path to the Python interpreter (conda/venv) that has thecannon +
 # wandb installed, e.g. /scratch/mk27/envs/thecannon/bin/python
-PYTHON_BIN="python"
+PYTHON_BIN="/scratch/y89/mj8805/miniforge/envs/astro/bin/python"
 WANDB_PROJECT="cannon-sweep"
 # The command that runs the sweep. scripts/run_sweep.py loads + normalizes the
 # spectra (defaults point at the bulge-ages-and-orbits data) and cross-validates
