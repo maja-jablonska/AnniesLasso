@@ -59,7 +59,7 @@ Single machine with internet (40-trial Bayesian sweep)::
 
     wandb login
     python -m scripts.wandb_sweep --role agent \\
-        --spectra /path/cleaned_ages.parquet \\
+        --spectra /path/merged_with_ages_raw.parquet \\
         --continuum-list /path/continuum.list \\
         --label-set raw_teff,raw_logg,raw_fe_h \\
         --label-set raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe \\
@@ -630,13 +630,14 @@ def main():
     args.spectra_present = args.spectra is not None
     if args.role in ("agent", "worker") and not args.demo:
         if __package__:
-            from scripts.train_cannon import DEFAULT_DATA_DIR
+            from scripts.train_cannon import (DEFAULT_SPECTRA,
+                                              DEFAULT_CONTINUUM_LIST)
         else:
-            from train_cannon import DEFAULT_DATA_DIR
+            from train_cannon import DEFAULT_SPECTRA, DEFAULT_CONTINUUM_LIST
         if args.spectra is None:
-            args.spectra = os.path.join(DEFAULT_DATA_DIR, "cleaned_ages.parquet")
+            args.spectra = DEFAULT_SPECTRA
         if args.continuum_list is None:
-            args.continuum_list = os.path.join(DEFAULT_DATA_DIR, "continuum.list")
+            args.continuum_list = DEFAULT_CONTINUUM_LIST
 
     if args.role in ("controller", "worker") and not args.broker:
         parser.error("--broker is required for --role controller/worker")

@@ -38,7 +38,7 @@ PYTHON_BIN="/scratch/y89/mj8805/miniforge/envs/astro/bin/python"
 # Shared broker directory -- MUST match the controller's. Override via `qsub -v`.
 BROKER="${BROKER:-/scratch/mk27/cannon-bayes-broker}"
 # Data (defaults point at the bulge-ages-and-orbits set); or pass --demo below.
-SPECTRA="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/cleaned_ages.parquet"
+SPECTRA="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet"
 CONTINUUM_LIST="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list"
 N_SPLITS=5
 SEED=0

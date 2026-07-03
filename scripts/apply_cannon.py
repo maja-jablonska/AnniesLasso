@@ -29,7 +29,7 @@ Usage
 With an explicit config file::
 
     python -m scripts.apply_cannon \\
-        --spectra /path/to/cleaned_ages.parquet \\
+        --spectra /path/to/merged_with_ages_raw.parquet \\
         --continuum-list /path/to/continuum.list \\
         --config config.json \\
         --output-dir results/
@@ -67,11 +67,13 @@ import thecannon as tc
 try:
     from scripts.train_cannon import (load_spectra, normalize_spectra,
                                        quality_mask, DEFAULT_DATA_DIR,
+                                       DEFAULT_SPECTRA, DEFAULT_CONTINUUM_LIST,
                                        DEFAULT_LABELS)
     from scripts.sweep_config import add_filter_arg, filter_mask
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
-                              DEFAULT_DATA_DIR, DEFAULT_LABELS)
+                              DEFAULT_DATA_DIR, DEFAULT_SPECTRA,
+                              DEFAULT_CONTINUUM_LIST, DEFAULT_LABELS)
     from sweep_config import add_filter_arg, filter_mask
 
 logger = logging.getLogger("thecannon.apply")
@@ -295,12 +297,9 @@ def _run_demo(args, config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--spectra",
-                        default=os.path.join(DEFAULT_DATA_DIR,
-                                             "cleaned_ages.parquet"),
+    parser.add_argument("--spectra", default=DEFAULT_SPECTRA,
                         help="parquet table of spectra + labels")
-    parser.add_argument("--continuum-list",
-                        default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
+    parser.add_argument("--continuum-list", default=DEFAULT_CONTINUUM_LIST,
                         help="text file of continuum pixel indices")
     parser.add_argument("--config", default=None,
                         help="JSON config file (labels, order, regularization, "

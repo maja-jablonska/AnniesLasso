@@ -18,7 +18,7 @@ Usage
 ::
 
     python -m scripts.run_sweep \\
-        --spectra /path/cleaned_ages.parquet \\
+        --spectra /path/merged_with_ages_raw.parquet \\
         --continuum-list /path/continuum.list \\
         --label-set raw_teff,raw_logg,raw_fe_h \\
         --label-set raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe \\
@@ -44,6 +44,7 @@ import numpy as np
 try:
     from scripts.train_cannon import (load_spectra, normalize_spectra,
                                        quality_mask, DEFAULT_DATA_DIR,
+                                       DEFAULT_SPECTRA, DEFAULT_CONTINUUM_LIST,
                                        DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
     from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
@@ -51,7 +52,8 @@ try:
                                        load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
-                              DEFAULT_DATA_DIR, DEFAULT_LABELS)
+                              DEFAULT_DATA_DIR, DEFAULT_SPECTRA,
+                              DEFAULT_CONTINUUM_LIST, DEFAULT_LABELS)
     from sweep_cannon import sweep
     from sweep_config import (add_label_builder_args, add_filter_arg,
                              apply_filters, age_reliability_masks, load_golden)
@@ -166,12 +168,9 @@ def finite_label_mapping(label_source, label_union):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--spectra",
-                        default=os.path.join(DEFAULT_DATA_DIR,
-                                             "cleaned_ages.parquet"),
+    parser.add_argument("--spectra", default=DEFAULT_SPECTRA,
                         help="parquet table of spectra + labels")
-    parser.add_argument("--continuum-list",
-                        default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
+    parser.add_argument("--continuum-list", default=DEFAULT_CONTINUUM_LIST,
                         help="text file of continuum pixel indices")
     add_label_builder_args(parser)
     add_filter_arg(parser)

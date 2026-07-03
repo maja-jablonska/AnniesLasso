@@ -50,7 +50,7 @@ Usage
 Greedy forward selection toward age, from a pool of abundances::
 
     python -m scripts.select_labels \\
-        --spectra /path/cleaned_ages.parquet \\
+        --spectra /path/merged_with_ages_raw.parquet \\
         --continuum-list /path/continuum.list \\
         --core raw_teff,raw_logg,raw_fe_h \\
         --candidates mg_fe,ce_fe,ca_fe,si_fe,ni_fe,mn_fe,al_fe,c_fe,n_fe \\
@@ -80,7 +80,8 @@ import numpy as np
 # Work both as a package module and when run directly from scripts/.
 try:
     from scripts.train_cannon import (load_spectra, normalize_spectra,
-                                       quality_mask, DEFAULT_DATA_DIR)
+                                       quality_mask, DEFAULT_SPECTRA,
+                                       DEFAULT_CONTINUUM_LIST)
     from scripts.run_sweep import finite_label_mapping
     from scripts.sweep_cannon import _label_matrix, cross_validate, _summarize
     from scripts.sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
@@ -88,7 +89,7 @@ try:
                                        load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
-                              DEFAULT_DATA_DIR)
+                              DEFAULT_SPECTRA, DEFAULT_CONTINUUM_LIST)
     from run_sweep import finite_label_mapping
     from sweep_cannon import _label_matrix, cross_validate, _summarize
     from sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
@@ -354,11 +355,8 @@ def report(rows, chosen, metric, goal, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--spectra",
-                        default=os.path.join(DEFAULT_DATA_DIR,
-                                             "cleaned_ages.parquet"))
-    parser.add_argument("--continuum-list",
-                        default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"))
+    parser.add_argument("--spectra", default=DEFAULT_SPECTRA)
+    parser.add_argument("--continuum-list", default=DEFAULT_CONTINUUM_LIST)
     parser.add_argument("--mode", default="forward",
                         choices=["forward", "screen", "subsets"])
     parser.add_argument("--core", type=lambda s: s.split(","),

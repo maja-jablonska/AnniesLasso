@@ -25,7 +25,7 @@ Usage
 On the real data (defaults point at the bulge-ages-and-orbits data set)::
 
     python -m scripts.train_cannon \\
-        --spectra /path/to/cleaned_ages.parquet \\
+        --spectra /path/to/merged_with_ages_raw.parquet \\
         --continuum-list /path/to/continuum.list \\
         --labels raw_teff,raw_logg,raw_fe_h,raw_mg_h,raw_ce_h,age_L,mass_L \\
         --order 2 --output-dir results/
@@ -61,6 +61,10 @@ logger = logging.getLogger("thecannon.train")
 
 # Defaults mirroring notebooks/start.ipynb.
 DEFAULT_DATA_DIR = "/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data"
+# Single source of truth for the default spectra table + continuum list, shared
+# by every driver (run_sweep, wandb_sweep, select_labels, apply_cannon).
+DEFAULT_SPECTRA = os.path.join(DEFAULT_DATA_DIR, "merged_with_ages_raw.parquet")
+DEFAULT_CONTINUUM_LIST = os.path.join(DEFAULT_DATA_DIR, "continuum.list")
 DEFAULT_LABELS = ["raw_teff", "raw_logg", "raw_fe_h", "raw_mg_h", "raw_ce_h",
                   "age_L", "mass_L"]
 APOGEE_REGIONS = ([15090, 15822], [15823, 16451], [16452, 16971])
@@ -356,12 +360,9 @@ def _run_demo(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--spectra",
-                        default=os.path.join(DEFAULT_DATA_DIR,
-                                             "cleaned_ages.parquet"),
+    parser.add_argument("--spectra", default=DEFAULT_SPECTRA,
                         help="parquet table of spectra + labels")
-    parser.add_argument("--continuum-list",
-                        default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
+    parser.add_argument("--continuum-list", default=DEFAULT_CONTINUUM_LIST,
                         help="text file of continuum pixel indices")
     parser.add_argument("--labels", type=lambda s: s.split(","),
                         default=DEFAULT_LABELS,
