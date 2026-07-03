@@ -34,7 +34,7 @@ set -uo pipefail
 # ---- user configuration ---------------------------------------------------
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 # Absolute path to the Python interpreter (conda/venv) with thecannon installed.
-PYTHON_BIN="python"
+PYTHON_BIN="/scratch/y89/mj8805/miniforge/envs/astro/bin/python"
 # Shared broker directory -- MUST match the controller's. Override via `qsub -v`.
 BROKER="${BROKER:-/scratch/mk27/cannon-bayes-broker}"
 # Data (defaults point at the bulge-ages-and-orbits set); or pass --demo below.

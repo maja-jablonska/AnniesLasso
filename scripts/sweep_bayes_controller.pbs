@@ -35,7 +35,7 @@ set -uo pipefail
 
 # ---- user configuration ---------------------------------------------------
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
-PYTHON_BIN="python"
+PYTHON_BIN="/scratch/y89/mj8805/miniforge/envs/astro/bin/python"
 BROKER="${BROKER:-/scratch/mk27/cannon-bayes-broker}"
 WANDB_PROJECT="cannon-bayes"
 COUNT=40                       # trials this controller session runs
