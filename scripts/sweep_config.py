@@ -84,17 +84,18 @@ def add_filter_arg(parser):
     return parser
 
 
-def apply_filters(label_source, flux, ivar, filters, log=None):
+def filter_mask(label_source, filters, log=None):
     """
-    Restrict ``(label_source, flux, ivar)`` to the rows passing every pandas
-    query in ``filters``. ``label_source`` is a pandas DataFrame; ``flux`` and
-    ``ivar`` are row-aligned ``(N, P)`` arrays. Returns the filtered triple (the
-    inputs unchanged when ``filters`` is empty).
+    Boolean mask over the rows of ``label_source`` (a pandas DataFrame) selecting
+    those that pass every pandas query in ``filters`` (ANDed). An all-True mask
+    is returned when ``filters`` is empty. Use this when you need the mask itself
+    -- e.g. to AND a row cut into a training-set-selection mask while still
+    predicting for every star; use :func:`apply_filters` to subset outright.
     """
-    if not filters:
-        return label_source, flux, ivar
-
     mask = np.ones(len(label_source), dtype=bool)
+    if not filters:
+        return mask
+
     for expr in filters:
         try:
             m = np.asarray(label_source.eval(expr), dtype=bool)
@@ -111,6 +112,20 @@ def apply_filters(label_source, flux, ivar, filters, log=None):
 
     if log is not None:
         log.info("row filters kept %d/%d stars", int(mask.sum()), len(mask))
+    return mask
+
+
+def apply_filters(label_source, flux, ivar, filters, log=None):
+    """
+    Restrict ``(label_source, flux, ivar)`` to the rows passing every pandas
+    query in ``filters``. ``label_source`` is a pandas DataFrame; ``flux`` and
+    ``ivar`` are row-aligned ``(N, P)`` arrays. Returns the filtered triple (the
+    inputs unchanged when ``filters`` is empty).
+    """
+    if not filters:
+        return label_source, flux, ivar
+
+    mask = filter_mask(label_source, filters, log=log)
     if not mask.any():
         raise ValueError("row filters rejected every star: {0}".format(filters))
     return label_source[mask], flux[mask], ivar[mask]

@@ -51,6 +51,11 @@ import matplotlib.pyplot as plt
 import thecannon as tc
 from thecannon import continuum
 
+try:
+    from scripts.sweep_config import add_filter_arg, apply_filters
+except ImportError:
+    from sweep_config import add_filter_arg, apply_filters
+
 logger = logging.getLogger("thecannon.train")
 
 
@@ -315,6 +320,9 @@ def run(labels, normalized_flux, normalized_ivar, dispersion, label_names,
 
 def _run_real(args):
     spectra, dispersion, flux, ivar = load_spectra(args.spectra)
+    # Optional row filters on the label table (e.g. Rel_age_Dnu==True, snr>100).
+    spectra, flux, ivar = apply_filters(
+        spectra, flux, ivar, args.filters, log=logger)
     normalized_flux, normalized_ivar = normalize_spectra(
         dispersion, flux, ivar, args.continuum_list)
     return run(
@@ -358,6 +366,7 @@ def main():
     parser.add_argument("--labels", type=lambda s: s.split(","),
                         default=DEFAULT_LABELS,
                         help="comma-separated label column names")
+    add_filter_arg(parser)
     parser.add_argument("--order", type=int, default=2,
                         help="polynomial order of the vectorizer")
     parser.add_argument("--regularization", type=float, default=0.0,

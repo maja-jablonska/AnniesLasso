@@ -68,9 +68,11 @@ try:
     from scripts.train_cannon import (load_spectra, normalize_spectra,
                                        quality_mask, DEFAULT_DATA_DIR,
                                        DEFAULT_LABELS)
+    from scripts.sweep_config import add_filter_arg, filter_mask
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_LABELS)
+    from sweep_config import add_filter_arg, filter_mask
 
 logger = logging.getLogger("thecannon.apply")
 
@@ -83,6 +85,7 @@ DEFAULT_CONFIG = {
     "regularization": 0.0,        # L1 regularization strength (0 = none)
     "train_frac": 1.0,            # fraction of eligible stars used for training
     "quality_cut": True,          # apply the spectrum_flags / warn_* cuts
+    "filters": None,              # row filters that gate the training set only
     "seed": 888,                  # RNG seed for the training-set draw
 }
 
@@ -159,6 +162,12 @@ def train_and_apply(label_source, normalized_flux, normalized_ivar, dispersion,
         eligible = np.asarray(quality_mask(label_source), dtype=bool)
     else:
         eligible = np.ones(len(label_array), dtype=bool)
+
+    # Row filters (e.g. Rel_age_Dnu==True, snr>100) gate the TRAINING set only;
+    # the trained model is still applied to every star in the sample below.
+    if config.get("filters"):
+        eligible = eligible & filter_mask(
+            label_source, config["filters"], log=logger)
 
     train_set = select_training_set(
         label_array, eligible, config["train_frac"], config["seed"])
@@ -271,8 +280,9 @@ def _run_demo(args, config):
     names, labels, dispersion, flux, ivar = load_golden()
     label_source = pd.DataFrame(labels)
 
-    # The golden set has no quality columns; train on all of it.
-    config = dict(config, labels=names, quality_cut=False, train_frac=1.0)
+    # The golden set has no quality/filter columns; train on all of it.
+    config = dict(config, labels=names, quality_cut=False, train_frac=1.0,
+                  filters=None)
     print("Demo on golden data: {0} stars, {1} pixels, labels {2}".format(
         flux.shape[0], flux.shape[1], names))
 
@@ -294,9 +304,10 @@ def main():
                         help="text file of continuum pixel indices")
     parser.add_argument("--config", default=None,
                         help="JSON config file (labels, order, regularization, "
-                             "train_frac, quality_cut, seed)")
+                             "train_frac, quality_cut, filters, seed)")
     parser.add_argument("--labels", type=lambda s: s.split(","), default=None,
                         help="comma-separated label columns; overrides --config")
+    add_filter_arg(parser)
     parser.add_argument("--order", type=int, default=None,
                         help="polynomial order; overrides --config")
     parser.add_argument("--regularization", type=float, default=None,
@@ -331,6 +342,8 @@ def main():
         config["regularization"] = args.regularization
     if args.train_frac is not None:
         config["train_frac"] = args.train_frac
+    if args.filters is not None:
+        config["filters"] = args.filters
     logger.info("run config: %s", config)
 
     if args.demo:
