@@ -164,8 +164,9 @@ def abundance_flag_masks(label_source):
     """
     Return ``{label_col: bool_array}`` where the mask is True for stars whose
     ASPCAP abundance flag for that element is 0 (unflagged). Recognises the flag
-    column ``<EL>_FE_FLAG`` or ``<EL>_H_FLAG`` (case-insensitive); labels with no
-    flag column present are omitted (so they impose no cut).
+    column ``<EL>_H_FLAGS`` / ``<EL>_FE_FLAGS`` (Astra) or ``<EL>_H_FLAG`` /
+    ``<EL>_FE_FLAG`` (DR17), case-insensitive; labels with no flag column present
+    are omitted (so they impose no cut).
     """
     columns = getattr(label_source, "columns", None)
     cols = list(columns) if columns is not None else []
@@ -177,7 +178,8 @@ def abundance_flag_masks(label_source):
         element = _element_of(col)
         if element is None:
             continue
-        for cand in ("{0}_fe_flag".format(element), "{0}_h_flag".format(element)):
+        for cand in ("{0}_h_flags".format(element), "{0}_fe_flags".format(element),
+                     "{0}_h_flag".format(element), "{0}_fe_flag".format(element)):
             if cand in lut:
                 flags = np.asarray(label_source[lut[cand]])
                 # NaN -> treat as unflagged (0); otherwise 0 == good.

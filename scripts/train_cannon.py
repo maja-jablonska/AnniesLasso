@@ -145,20 +145,25 @@ def _bitmask_bad(series, bad_bits):
 
 def quality_mask(table):
     """
-    Boolean mask over the rows of ``table`` selecting stars that pass the
-    quality cuts: ``spectrum_flags == 0``, no ``warn_*`` column True, and the
-    APOGEE flag cuts -- ``ASPCAPFLAG`` STAR_BAD, the bad ``STARFLAG`` bits
-    (persistence / bright neighbour / low S/N / suspect RV or broad lines), and
-    ``VSCATTER`` <= VSCATTER_MAX (drop likely binaries). Missing columns skip the
-    corresponding cut with a warning rather than rejecting everything.
+    Boolean mask over the rows of ``table`` selecting stars that pass the quality
+    cuts. Handles both classic APOGEE DR17 and SDSS-V/Astra column names, and
+    skips (with a warning) any cut whose column is absent:
+
+      - spectrum flags == 0        (``spectrum_flags`` / ``spectrum_flags_x``)
+      - no ``warn_*`` column True
+      - the ASPCAP bad-fit flag     (Astra ``flag_bad``; else DR17 ``ASPCAPFLAG``
+        STAR_BAD and the bad ``STARFLAG`` bits)
+      - RV scatter <= VSCATTER_MAX  (``std_v_rad_x`` / ``VSCATTER``), dropping
+        likely binaries
     """
     n = len(table)
     mask = np.ones(n, dtype=bool)
 
-    if "spectrum_flags" in table.columns:
-        clean = np.asarray(table["spectrum_flags"].fillna(-1) == 0)
-        logger.info("quality cut: %d/%d stars rejected by spectrum_flags != 0",
-                    int((~clean).sum()), n)
+    spec = _find_column(table, "spectrum_flags", "spectrum_flags_x")
+    if spec is not None:
+        clean = np.asarray(table[spec].fillna(-1) == 0)
+        logger.info("quality cut: %d/%d rejected by %s != 0",
+                    int((~clean).sum()), n, spec)
         mask &= clean
     else:
         logger.warning("no spectrum_flags column; skipping that quality cut")
@@ -172,33 +177,39 @@ def quality_mask(table):
     else:
         logger.warning("no warn_* columns; skipping that quality cut")
 
-    # --- APOGEE ASPCAPFLAG / STARFLAG bitmasks + VSCATTER -----------------
+    # ASPCAP bad fit: Astra boolean flag_bad, else DR17 ASPCAPFLAG STAR_BAD.
+    flag_bad = _find_column(table, "flag_bad")
     aspcap = _find_column(table, "ASPCAPFLAG", "aspcap_flag")
-    if aspcap is not None:
+    if flag_bad is not None:
+        bad = np.asarray(table[flag_bad].fillna(False), dtype=bool)
+        logger.info("quality cut: %d/%d rejected by flag_bad", int(bad.sum()), n)
+        mask &= ~bad
+    elif aspcap is not None:
         bad = _bitmask_bad(table[aspcap], [ASPCAPFLAG_STAR_BAD])
         logger.info("quality cut: %d/%d rejected by ASPCAPFLAG STAR_BAD",
                     int(bad.sum()), n)
         mask &= ~bad
     else:
-        logger.warning("no ASPCAPFLAG column; skipping the STAR_BAD cut")
+        logger.warning("no flag_bad / ASPCAPFLAG column; skipping bad-fit cut")
 
+    # DR17 STARFLAG bits (absent in Astra tables -> silently skipped).
     starflag = _find_column(table, "STARFLAG", "star_flag")
     if starflag is not None:
         bad = _bitmask_bad(table[starflag], STARFLAG_BAD_BITS)
         logger.info("quality cut: %d/%d rejected by STARFLAG bits %s",
                     int(bad.sum()), n, sorted(STARFLAG_BAD_BITS))
         mask &= ~bad
-    else:
-        logger.warning("no STARFLAG column; skipping the STARFLAG cut")
 
-    vscatter = _find_column(table, "VSCATTER", "v_scatter")
+    # RV scatter -> likely binaries.
+    vscatter = _find_column(table, "std_v_rad_x", "VSCATTER", "v_scatter",
+                            "std_v_rad")
     if vscatter is not None:
         bad = np.asarray((table[vscatter] > VSCATTER_MAX).fillna(False))
-        logger.info("quality cut: %d/%d rejected by VSCATTER > %.2f km/s",
-                    int(bad.sum()), n, VSCATTER_MAX)
+        logger.info("quality cut: %d/%d rejected by %s > %.2f km/s",
+                    int(bad.sum()), n, vscatter, VSCATTER_MAX)
         mask &= ~bad
     else:
-        logger.warning("no VSCATTER column; skipping the binary cut")
+        logger.warning("no RV-scatter column; skipping the binary cut")
 
     return mask
 
