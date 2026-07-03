@@ -69,6 +69,53 @@ def add_label_builder_args(parser):
     return parser
 
 
+def add_filter_arg(parser):
+    """
+    Add the repeatable ``--filter`` row-selection argument: each value is a
+    pandas query on the label table (e.g. ``"Rel_age_Dnu == True"``) that the
+    training / cross-validation pool must satisfy. Multiple filters are ANDed.
+    """
+    parser.add_argument("--filter", dest="filters", action="append",
+                        default=None, metavar="QUERY",
+                        help="row filter as a pandas query on the label table, "
+                             "e.g. \"Rel_age_Dnu == True\" (repeatable; all must "
+                             "pass). Applied to the training/CV pool before "
+                             "continuum normalization.")
+    return parser
+
+
+def apply_filters(label_source, flux, ivar, filters, log=None):
+    """
+    Restrict ``(label_source, flux, ivar)`` to the rows passing every pandas
+    query in ``filters``. ``label_source`` is a pandas DataFrame; ``flux`` and
+    ``ivar`` are row-aligned ``(N, P)`` arrays. Returns the filtered triple (the
+    inputs unchanged when ``filters`` is empty).
+    """
+    if not filters:
+        return label_source, flux, ivar
+
+    mask = np.ones(len(label_source), dtype=bool)
+    for expr in filters:
+        try:
+            m = np.asarray(label_source.eval(expr), dtype=bool)
+        except Exception as exc:
+            raise ValueError("could not apply --filter {0!r}: {1}".format(
+                expr, exc))
+        if m.shape != mask.shape:
+            raise ValueError(
+                "--filter {0!r} did not yield one boolean per row (got shape "
+                "{1})".format(expr, m.shape))
+        if log is not None:
+            log.info("filter %r: %d/%d rows pass", expr, int(m.sum()), len(m))
+        mask &= m
+
+    if log is not None:
+        log.info("row filters kept %d/%d stars", int(mask.sum()), len(mask))
+    if not mask.any():
+        raise ValueError("row filters rejected every star: {0}".format(filters))
+    return label_source[mask], flux[mask], ivar[mask]
+
+
 # --------------------------------------------------------------------------- #
 #  Bundled golden test set                                                     #
 # --------------------------------------------------------------------------- #

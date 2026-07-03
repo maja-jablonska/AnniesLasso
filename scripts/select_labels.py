@@ -83,13 +83,15 @@ try:
                                        quality_mask, DEFAULT_DATA_DIR)
     from scripts.run_sweep import finite_label_mapping
     from scripts.sweep_cannon import _label_matrix, cross_validate, _summarize
-    from scripts.sweep_config import DEFAULT_ABUNDANCES, load_golden
+    from scripts.sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
+                                       apply_filters, load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR)
     from run_sweep import finite_label_mapping
     from sweep_cannon import _label_matrix, cross_validate, _summarize
-    from sweep_config import DEFAULT_ABUNDANCES, load_golden
+    from sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
+                             apply_filters, load_golden)
 
 logger = logging.getLogger("thecannon.select_labels")
 
@@ -299,6 +301,8 @@ def load(args):
             raise ValueError("quality cuts rejected every star")
         label_source = label_source[good]
         flux, ivar = flux[good], ivar[good]
+        label_source, flux, ivar = apply_filters(
+            label_source, flux, ivar, args.filters, log=logger)
         flux, ivar = normalize_spectra(dispersion, flux, ivar,
                                        args.continuum_list)
 
@@ -359,6 +363,7 @@ def main():
     parser.add_argument("--candidates", type=lambda s: s.split(","),
                         default=["mg_fe"] + list(DEFAULT_ABUNDANCES),
                         help="candidate columns to select from")
+    add_filter_arg(parser)
     parser.add_argument("--target", default=None,
                         help="optimize this label's r2 (pinned into the core)")
     parser.add_argument("--metric", default=None,

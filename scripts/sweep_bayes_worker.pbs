@@ -62,6 +62,7 @@ ${PYTHON_BIN} -m scripts.wandb_sweep --role worker \
     --continuum-list "${CONTINUUM_LIST}" \
     --n-splits "${N_SPLITS}" \
     --seed "${SEED}" \
+    --filter Rel_age_Dnu==True \
     --worker-idle-timeout "${IDLE_TIMEOUT}" \
     -v
 rc=$?

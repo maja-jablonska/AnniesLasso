@@ -46,12 +46,14 @@ try:
                                        quality_mask, DEFAULT_DATA_DIR,
                                        DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
-    from scripts.sweep_config import add_label_builder_args, load_golden
+    from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
+                                       apply_filters, load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_LABELS)
     from sweep_cannon import sweep
-    from sweep_config import add_label_builder_args, load_golden
+    from sweep_config import (add_label_builder_args, add_filter_arg,
+                             apply_filters, load_golden)
 
 logger = logging.getLogger("thecannon.run_sweep")
 
@@ -171,6 +173,7 @@ def main():
                         default=os.path.join(DEFAULT_DATA_DIR, "continuum.list"),
                         help="text file of continuum pixel indices")
     add_label_builder_args(parser)
+    add_filter_arg(parser)
     parser.add_argument("--orders", type=lambda s: [int(x) for x in s.split(",")],
                         default=[1, 2], help="comma-separated polynomial orders")
     parser.add_argument("--regularizations",
@@ -226,6 +229,10 @@ def main():
                     int(good.sum()), good.size)
         label_source = label_source[good]
         flux, ivar = flux[good], ivar[good]
+
+        # Optional row filters on the label table (e.g. Rel_age_Dnu == True).
+        label_source, flux, ivar = apply_filters(
+            label_source, flux, ivar, args.filters, log=logger)
 
         norm_flux, norm_ivar = normalize_spectra(
             dispersion, flux, ivar, args.continuum_list)

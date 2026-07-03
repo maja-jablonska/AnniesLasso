@@ -99,9 +99,11 @@ import numpy as np
 # Lightweight shared config (stdlib + numpy only, no science stack) -- safe to
 # import at module top even for the network-light controller role.
 try:
-    from scripts.sweep_config import add_label_builder_args, load_golden
+    from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
+                                       apply_filters, load_golden)
 except ImportError:
-    from sweep_config import add_label_builder_args, load_golden
+    from sweep_config import (add_label_builder_args, add_filter_arg,
+                             apply_filters, load_golden)
 
 logger = logging.getLogger("thecannon.wandb_sweep")
 
@@ -474,6 +476,8 @@ def _load_data(args):
             raise ValueError("quality cuts rejected every star")
         label_source = label_source[good]
         flux, ivar = flux[good], ivar[good]
+        label_source, flux, ivar = apply_filters(
+            label_source, flux, ivar, args.filters, log=logger)
         flux, ivar = normalize_spectra(dispersion, flux, ivar,
                                        args.continuum_list)
         label_sets = args.label_sets or build_label_sets(
@@ -552,6 +556,7 @@ def main():
     parser.add_argument("--continuum-list", default=None,
                         help="text file of continuum pixel indices")
     add_label_builder_args(parser)
+    add_filter_arg(parser)
     # Search space.
     parser.add_argument("--orders", type=lambda s: [int(x) for x in s.split(",")],
                         default=[1, 2])
