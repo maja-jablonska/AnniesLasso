@@ -62,7 +62,6 @@ ${PYTHON_BIN} -m scripts.select_labels \
     --continuum-list "${CONTINUUM_LIST}" \
     --core "${CORE}" \
     --candidates "${CANDIDATES}" \
-    --filter Rel_age_Dnu==True \
     --filter "snr>100" \
     "${target_arg[@]}" \
     --order "${ORDER}" \

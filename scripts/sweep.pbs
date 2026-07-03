@@ -38,7 +38,9 @@ WANDB_PROJECT="cannon-sweep"
 # the grid. Override --spectra/--continuum-list/--labels/--orders/etc. as needed,
 # or pass --demo to dry-run on the bundled golden data.
 # --mass-col= (empty) disables the base+mass label-set variants.
-SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --mass-col= --filter Rel_age_Dnu==True --filter snr>100 --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
+# The per-age reliability cut (RelAge_Dnu / RelAge_L) is applied automatically
+# per label set; only the global S/N cut is passed here.
+SWEEP_CMD="${PYTHON_BIN} -m scripts.run_sweep --mass-col= --filter snr>100 --wandb-project ${WANDB_PROJECT} --wandb-mode offline -v"
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"

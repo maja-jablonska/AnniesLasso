@@ -84,14 +84,15 @@ try:
     from scripts.run_sweep import finite_label_mapping
     from scripts.sweep_cannon import _label_matrix, cross_validate, _summarize
     from scripts.sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
-                                       apply_filters, load_golden)
+                                       apply_filters, age_reliability_masks,
+                                       load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR)
     from run_sweep import finite_label_mapping
     from sweep_cannon import _label_matrix, cross_validate, _summarize
     from sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
-                             apply_filters, load_golden)
+                             apply_filters, age_reliability_masks, load_golden)
 
 logger = logging.getLogger("thecannon.select_labels")
 
@@ -121,12 +122,12 @@ def _better(a, b, goal):
 # --------------------------------------------------------------------------- #
 
 def make_evaluator(mapping, flux, ivar, dispersion, order, regularization,
-    n_splits, seed):
+    n_splits, seed, age_masks=None):
     """
     Return ``evaluate(label_set) -> row`` where ``row`` is the ``_summarize``
     metric dict for that label set (cross-validated at the fixed order /
-    regularization). Results are memoized so ``forward``/``subsets`` never
-    re-evaluate the same set.
+    regularization, with the per-set age-reliability cut). Results are memoized
+    so ``forward``/``subsets`` never re-evaluate the same set.
     """
     cache = {}
 
@@ -136,7 +137,8 @@ def make_evaluator(mapping, flux, ivar, dispersion, order, regularization,
             label_array = _label_matrix(mapping, key)
             cv = cross_validate(
                 label_array, flux, ivar, dispersion, key, order=order,
-                regularization=regularization, n_splits=n_splits, seed=seed)
+                regularization=regularization, n_splits=n_splits, seed=seed,
+                age_reliability=age_masks)
             cache[key] = _summarize(cv, key)
         return cache[key]
 
@@ -314,8 +316,10 @@ def load(args):
     # One finite mask over EVERY referenced column, so all label sets are scored
     # on identical stars (a fair comparison, at the cost of some dropped stars).
     mapping, finite = finite_label_mapping(label_source, union)
+    age_masks = {age: mask[finite]
+                 for age, mask in age_reliability_masks(label_source).items()}
     return (mapping, flux[finite], ivar[finite], dispersion, int(finite.sum()),
-            tuple(core), tuple(candidates))
+            tuple(core), tuple(candidates), age_masks)
 
 
 # --------------------------------------------------------------------------- #
@@ -396,7 +400,8 @@ def main():
 
     metric, goal = resolve_metric(args)
 
-    mapping, flux, ivar, dispersion, n_stars, core, candidates = load(args)
+    (mapping, flux, ivar, dispersion, n_stars, core, candidates,
+     age_masks) = load(args)
     logger.info("selecting over core=%s candidates=%s on %d stars "
                 "(order=%d, reg=%g, %d folds)", "+".join(core),
                 ",".join(candidates), n_stars, args.order, args.regularization,
@@ -404,7 +409,7 @@ def main():
 
     evaluate = make_evaluator(
         mapping, flux, ivar, dispersion, args.order, args.regularization,
-        args.n_splits, args.seed)
+        args.n_splits, args.seed, age_masks=age_masks)
 
     chosen = None
     if args.mode == "forward":

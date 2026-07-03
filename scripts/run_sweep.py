@@ -47,13 +47,14 @@ try:
                                        DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
     from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
-                                       apply_filters, load_golden)
+                                       apply_filters, age_reliability_masks,
+                                       load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_LABELS)
     from sweep_cannon import sweep
     from sweep_config import (add_label_builder_args, add_filter_arg,
-                             apply_filters, load_golden)
+                             apply_filters, age_reliability_masks, load_golden)
 
 logger = logging.getLogger("thecannon.run_sweep")
 
@@ -250,6 +251,14 @@ def main():
         name for label_set in label_sets for name in label_set))
     mapping, finite = finite_label_mapping(label_source, label_union)
 
+    # Per-age reliability flags (RelAge_Dnu / RelAge_L), aligned to the finite
+    # rows; each label set is cut to the stars whose age column(s) are reliable.
+    age_masks = {age: mask[finite]
+                 for age, mask in age_reliability_masks(label_source).items()}
+    if age_masks:
+        logger.info("age-reliability cuts active for: %s",
+                    ", ".join(sorted(age_masks)))
+
     logger.info("sweeping %d label sets x %d orders x %d regularizations",
                 len(label_sets), len(args.orders), len(args.regularizations))
     for label_set in label_sets:
@@ -263,6 +272,7 @@ def main():
         n_splits=n_splits,
         seed=args.seed,
         output=args.output,
+        age_reliability=age_masks,
         wandb_project=args.wandb_project,
         wandb_mode=args.wandb_mode)
 

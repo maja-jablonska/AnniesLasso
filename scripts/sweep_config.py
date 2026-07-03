@@ -112,6 +112,53 @@ def _column_hint(label_source, expr):
     return " {0}: {1}{2}".format(label, listed, more)
 
 
+# --------------------------------------------------------------------------- #
+#  Age-reliability cut (per label set)                                          #
+# --------------------------------------------------------------------------- #
+
+# Each age label column is only reliable for stars where its flag column is
+# True; a label set is cut to the stars for which every age column it fits is
+# reliable (no cut when it fits none). Extend this mapping as needed.
+AGE_RELIABILITY = {"age_Dnu": "RelAge_Dnu", "age_L": "RelAge_L"}
+
+
+def age_reliability_masks(label_source, mapping=None):
+    """
+    Return ``{age_col: bool_array}`` giving, for each age column whose flag column
+    exists in ``label_source``, the per-row "this age is reliable" mask. Flags may
+    be boolean, 0/1, or the strings "True"/"1". Age columns with no flag column
+    present are omitted (so they impose no cut).
+    """
+    mapping = AGE_RELIABILITY if mapping is None else mapping
+    columns = getattr(label_source, "columns", None)
+    cols = list(columns) if columns is not None else []
+    out = {}
+    for age_col, rel_col in mapping.items():
+        if rel_col in cols:
+            col = label_source[rel_col]
+            out[age_col] = np.asarray(
+                col.isin([True, 1, "True", "true", "1"])
+                if hasattr(col, "isin") else np.asarray(col, dtype=bool))
+    return out
+
+
+def label_set_row_mask(label_names, age_masks):
+    """
+    Boolean row mask selecting stars for which every age column present in
+    ``label_names`` is reliable, or ``None`` when the set fits no age column (no
+    restriction). ``age_masks`` is the dict from :func:`age_reliability_masks`.
+    """
+    if not age_masks:
+        return None
+    masks = [age_masks[c] for c in label_names if c in age_masks]
+    if not masks:
+        return None
+    mask = masks[0].copy()
+    for m in masks[1:]:
+        mask = mask & m
+    return mask
+
+
 def filter_mask(label_source, filters, log=None):
     """
     Boolean mask over the rows of ``label_source`` (a pandas DataFrame) selecting

@@ -100,10 +100,11 @@ import numpy as np
 # import at module top even for the network-light controller role.
 try:
     from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
-                                       apply_filters, load_golden)
+                                       apply_filters, age_reliability_masks,
+                                       load_golden)
 except ImportError:
     from sweep_config import (add_label_builder_args, add_filter_arg,
-                             apply_filters, load_golden)
+                             apply_filters, age_reliability_masks, load_golden)
 
 logger = logging.getLogger("thecannon.wandb_sweep")
 
@@ -201,7 +202,7 @@ def _claim_one(tasks_dir, claimed_dir):
 # --------------------------------------------------------------------------- #
 
 def make_inline_objective(mapping, flux, ivar, dispersion, n_splits, seed,
-    metric, wandb_project=None):
+    metric, wandb_project=None, age_masks=None):
     """
     Objective for ``--role agent``: read the point from ``wandb.config``,
     cross-validate one model inline, and log the full metric row.
@@ -219,7 +220,7 @@ def make_inline_objective(mapping, flux, ivar, dispersion, n_splits, seed,
             cv = sc.cross_validate(
                 label_array, flux, ivar, dispersion, label_set,
                 order=int(cfg.order), regularization=float(cfg.regularization),
-                n_splits=n_splits, seed=seed)
+                n_splits=n_splits, seed=seed, age_reliability=age_masks)
             row = sc._summarize(cv, label_set)
             wandb.log(_scalars(row))
         finally:
@@ -298,7 +299,8 @@ def run_worker(args):
     else:
         from sweep_cannon import _label_matrix, cross_validate, _summarize
 
-    mapping, flux, ivar, dispersion, label_sets, n_splits = _load_data(args)
+    (mapping, flux, ivar, dispersion, label_sets, n_splits,
+     age_masks) = _load_data(args)
     paths = _broker_paths(args.broker)
 
     # Publish the data-filtered label sets so a controller can (optionally) read
@@ -340,7 +342,7 @@ def run_worker(args):
                 label_array, flux, ivar, dispersion, label_set,
                 order=int(task["order"]),
                 regularization=float(task["regularization"]),
-                n_splits=n_splits, seed=args.seed)
+                n_splits=n_splits, seed=args.seed, age_reliability=age_masks)
             row = _summarize(cv, label_set)
             result = {"status": "ok", "trial_id": trial_id, "metrics": row}
             logger.info("trial %s done: %s=%.5g", trial_id, args.metric,
@@ -426,11 +428,12 @@ def run_agent(args):
     """ All-in-one mode: build/attach a sweep and evaluate inline. """
     import wandb
     os.environ.setdefault("WANDB_MODE", args.wandb_mode)
-    mapping, flux, ivar, dispersion, label_sets, n_splits = _load_data(args)
+    (mapping, flux, ivar, dispersion, label_sets, n_splits,
+     age_masks) = _load_data(args)
 
     objective = make_inline_objective(
         mapping, flux, ivar, dispersion, n_splits, args.seed, args.metric,
-        wandb_project=args.wandb_project)
+        wandb_project=args.wandb_project, age_masks=age_masks)
 
     if args.sweep_id:
         sweep_id = args.sweep_id
@@ -491,7 +494,10 @@ def _load_data(args):
     label_union = list(dict.fromkeys(
         name for label_set in label_sets for name in label_set))
     mapping, finite = finite_label_mapping(label_source, label_union)
-    return mapping, flux[finite], ivar[finite], dispersion, label_sets, n_splits
+    age_masks = {age: mask[finite]
+                 for age, mask in age_reliability_masks(label_source).items()}
+    return (mapping, flux[finite], ivar[finite], dispersion, label_sets,
+            n_splits, age_masks)
 
 
 def _dry_run(args):
@@ -512,7 +518,8 @@ def _dry_run(args):
     else:
         from sweep_cannon import _label_matrix, cross_validate, _summarize
 
-    mapping, flux, ivar, dispersion, label_sets, n_splits = _load_data(args)
+    (mapping, flux, ivar, dispersion, label_sets, n_splits,
+     age_masks) = _load_data(args)
     print("\n=== W&B sweep config ({0}) ===".format(args.method))
     print(json.dumps(build_sweep_config(
         label_sets, args.orders, args.method, args.metric, args.goal,
@@ -525,7 +532,7 @@ def _dry_run(args):
     cv = cross_validate(_label_matrix(mapping, label_set), flux, ivar,
                         dispersion, label_set, order=int(args.orders[0]),
                         regularization=float(reg_probe), n_splits=n_splits,
-                        seed=args.seed)
+                        seed=args.seed, age_reliability=age_masks)
     row = _summarize(cv, label_set)
     print("\n=== dry-run objective probe (label_set={0}, order={1}, reg={2:g}) ==="
           .format("+".join(label_set), args.orders[0], reg_probe))

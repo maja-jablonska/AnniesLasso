@@ -59,6 +59,11 @@ from thecannon.model import CannonModel
 from thecannon.vectorizer.polynomial import PolynomialVectorizer
 
 try:
+    from scripts.sweep_config import label_set_row_mask
+except ImportError:
+    from sweep_config import label_set_row_mask
+
+try:
     import wandb
 except ImportError:
     wandb = None
@@ -116,7 +121,7 @@ def _kfold_indices(n, n_splits, seed):
 
 def cross_validate(label_array, flux, ivar, dispersion, label_names, order,
     regularization, censors=None, n_splits=5, seed=0, train_kwds=None,
-    test_kwds=None):
+    test_kwds=None, age_reliability=None):
     """
     Run k-fold cross-validation for one hyper-parameter combination.
 
@@ -141,13 +146,30 @@ def cross_validate(label_array, flux, ivar, dispersion, label_names, order,
     :param censors: [optional]
         A :class:`thecannon.censoring.Censors` object (or ``None``).
 
+    :param age_reliability: [optional]
+        The ``{age_col: bool_array}`` mapping from
+        :func:`scripts.sweep_config.age_reliability_masks` (row-aligned to the
+        input arrays). When given, this label set is restricted to the stars for
+        which every age column it fits is flagged reliable (no restriction when
+        it fits no age column).
+
     :returns:
         A dict of held-out arrays -- ``recovered`` ``(N, K)``, ``reference``
         ``(N, K)``, ``residual`` ``(N, K)``, ``formal_err`` ``(N, K)`` (the
         model's own per-label 1-sigma uncertainties), ``r_chi_sq`` ``(N,)`` and
         ``in_hull`` ``(N,)`` -- plus the fold-averaged model-complexity scalars
-        ``theta_frac_zero`` and ``median_s2``.
+        ``theta_frac_zero`` and ``median_s2``. ``N`` is the post-age-cut count.
     """
+
+    # Restrict to the stars for which this set's age column(s) are reliable.
+    row_mask = label_set_row_mask(label_names, age_reliability)
+    if row_mask is not None:
+        row_mask = np.asarray(row_mask, dtype=bool)
+        logger.info("age-reliability cut for %s: %d/%d stars",
+                    "+".join(label_names), int(row_mask.sum()), row_mask.size)
+        label_array = label_array[row_mask]
+        flux = flux[row_mask]
+        ivar = ivar[row_mask]
 
     N, K = label_array.shape
     recovered = np.full((N, K), np.nan, dtype=float)
@@ -470,8 +492,8 @@ def _log_wandb_summary(project, entity, group, mode, run_dir, rows):
 
 def sweep(labels, flux, ivar, dispersion, label_sets, orders, regularizations,
     censor_factories=None, n_splits=5, seed=0, output=None, train_kwds=None,
-    test_kwds=None, wandb_project=None, wandb_entity=None, wandb_group=None,
-    wandb_mode="offline", wandb_dir=None):
+    test_kwds=None, age_reliability=None, wandb_project=None, wandb_entity=None,
+    wandb_group=None, wandb_mode="offline", wandb_dir=None):
     """
     Cross-validate The Cannon over a grid of label sets, polynomial orders,
     regularization strengths and (optionally) censoring schemes.
@@ -574,7 +596,7 @@ def sweep(labels, flux, ivar, dispersion, label_sets, orders, regularizations,
                 label_array, np.atleast_2d(flux), np.atleast_2d(ivar),
                 dispersion, label_set, order, reg, censors=censors,
                 n_splits=n_splits, seed=seed, train_kwds=train_kwds,
-                test_kwds=test_kwds)
+                test_kwds=test_kwds, age_reliability=age_reliability)
 
             row.update(_summarize(cv, label_set))
             row["status"] = "ok"
@@ -587,9 +609,11 @@ def sweep(labels, flux, ivar, dispersion, label_sets, orders, regularizations,
                 row["median_r_chi_sq"])
 
             # Per-run figure: the spread (recovered vs reference) for all labels.
+            # Use cv["reference"], not label_array, since the age cut may have
+            # reduced the rows.
             if run is not None:
                 fig = spread_figure(
-                    cv["recovered"], label_array, label_set,
+                    cv["recovered"], cv["reference"], label_set,
                     title="{0} | order={1} | reg={2:g} | {3}".format(
                         config["label_set"], order, reg, censor_name))
                 if fig is not None:
