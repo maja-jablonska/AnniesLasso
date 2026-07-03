@@ -1,0 +1,90 @@
+#!/bin/bash
+# ===========================================================================
+#  Cannon label-column selection -- single-GPU PBS job (gpuvolta).
+#
+#  Same as scripts/select_labels.pbs but on the GPU: the Cannon train/test steps
+#  are jax.vmap-vectorized, so a full-resolution screen (8575 px x ~10k stars)
+#  that crawls on rsaa runs far faster here. Pure compute -- no internet/W&B --
+#  so it just writes the selection CSV.
+#
+#  REQUIRES a CUDA-enabled jaxlib in ${PYTHON_BIN} (e.g. `pip install
+#  "jax[cuda12]"`). The backend check below fails loudly if the GPU backend is
+#  unavailable rather than silently crawling on CPU.
+#
+#  Submit with:   qsub scripts/select_labels_gpu.pbs
+#  or override:   qsub -v N_SPLITS=5,CANDIDATES=mg_fe,ce_fe,o_fe scripts/select_labels_gpu.pbs
+# ===========================================================================
+#PBS -N cannon-select-gpu
+#PBS -P mk27
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=95GB
+#PBS -l walltime=05:00:00
+#PBS -l storage=scratch/mk27+scratch/y89
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to a Python with thecannon + a CUDA jaxlib installed.
+PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
+# Data.
+SPECTRA="${SPECTRA:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet}"
+CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list}"
+# Selection setup.
+MODE="${MODE:-screen}"                        # screen | forward | subsets
+CORE="${CORE:-raw_teff,raw_logg,raw_fe_h}"
+CANDIDATES="${CANDIDATES:-mg_fe,ce_fe,ca_fe,si_fe,ni_fe,mn_fe,al_fe,c_fe,n_fe,o_fe,ti_fe,s_fe,k_fe,cr_fe,na_fe,co_fe,v_fe,cu_fe,p_fe,nd_fe}"
+TARGET="${TARGET:-age_L}"                      # optimize r2_<TARGET>; empty = mean_r2
+ORDER="${ORDER:-2}"
+REGULARIZATION="${REGULARIZATION:-0}"
+N_SPLITS="${N_SPLITS:-3}"                      # 3 folds for a faster screen (5 elsewhere)
+SEED="${SEED:-0}"
+OUTPUT="${OUTPUT:-${PROJECT_DIR}/label_selection_${MODE}.csv}"
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+# Persistent XLA compilation cache on /scratch, shared across jobs, so repeated
+# runs skip recompiling the same-shape train/test programs.
+export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
+mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
+
+# Use the GPU; fail loudly if the CUDA backend is missing (don't crawl on CPU).
+unset JAX_PLATFORMS
+${PYTHON_BIN} - <<'EOF'
+import jax
+print("JAX backend:", jax.default_backend(), jax.devices())
+assert jax.default_backend() == "gpu", \
+    "no GPU backend -- is a CUDA jaxlib installed in this environment?"
+EOF
+
+# Let GPU allocations grow instead of grabbing 75% up front.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+target_arg=()
+[ -n "${TARGET}" ] && target_arg=(--target "${TARGET}")
+
+echo "[$(date)] starting GPU label selection (mode=${MODE}) on $(hostname)"
+
+${PYTHON_BIN} -m scripts.select_labels \
+    --mode "${MODE}" \
+    --spectra "${SPECTRA}" \
+    --continuum-list "${CONTINUUM_LIST}" \
+    --core "${CORE}" \
+    --candidates "${CANDIDATES}" \
+    --filter "snr_x>100" \
+    "${target_arg[@]}" \
+    --order "${ORDER}" \
+    --regularization "${REGULARIZATION}" \
+    --n-splits "${N_SPLITS}" \
+    --seed "${SEED}" \
+    --output "${OUTPUT}" \
+    -v
+rc=$?
+
+echo "[$(date)] GPU label selection finished with exit code ${rc}; wrote ${OUTPUT}"
+exit ${rc}
