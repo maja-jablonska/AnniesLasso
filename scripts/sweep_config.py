@@ -116,10 +116,12 @@ def _column_hint(label_source, expr):
 #  Age-reliability cut (per label set)                                          #
 # --------------------------------------------------------------------------- #
 
-# Each age label column is only reliable for stars where its flag column is
-# True; a label set is cut to the stars for which every age column it fits is
-# reliable (no cut when it fits none). Extend this mapping as needed.
-AGE_RELIABILITY = {"age_Dnu": "RelAge_Dnu", "age_L": "RelAge_L"}
+# Each age/mass label column is only reliable for stars where its flag column is
+# True; a label set is cut to the stars for which every such column it fits is
+# reliable (no cut when it fits none). mass_L shares age_L's isochrone fit, so it
+# keys off the same RelAge_L flag. Extend this mapping as needed.
+AGE_RELIABILITY = {"age_Dnu": "RelAge_Dnu", "age_L": "RelAge_L",
+                   "mass_L": "RelAge_L"}
 
 
 def age_reliability_masks(label_source, mapping=None):
