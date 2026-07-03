@@ -48,7 +48,7 @@ try:
                                        DEFAULT_LABELS)
     from scripts.sweep_cannon import sweep
     from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
-                                       apply_filters, age_reliability_masks,
+                                       apply_filters, per_label_masks,
                                        load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
@@ -56,7 +56,7 @@ except ImportError:
                               DEFAULT_CONTINUUM_LIST, DEFAULT_LABELS)
     from sweep_cannon import sweep
     from sweep_config import (add_label_builder_args, add_filter_arg,
-                             apply_filters, age_reliability_masks, load_golden)
+                             apply_filters, per_label_masks, load_golden)
 
 logger = logging.getLogger("thecannon.run_sweep")
 
@@ -253,7 +253,7 @@ def main():
     # Per-age reliability flags (RelAge_Dnu / RelAge_L), aligned to the finite
     # rows; each label set is cut to the stars whose age column(s) are reliable.
     age_masks = {age: mask[finite]
-                 for age, mask in age_reliability_masks(label_source).items()}
+                 for age, mask in per_label_masks(label_source).items()}
     if age_masks:
         logger.info("age-reliability cuts active for: %s",
                     ", ".join(sorted(age_masks)))

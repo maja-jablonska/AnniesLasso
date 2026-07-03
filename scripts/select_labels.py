@@ -85,7 +85,7 @@ try:
     from scripts.run_sweep import finite_label_mapping
     from scripts.sweep_cannon import _label_matrix, cross_validate, _summarize
     from scripts.sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
-                                       apply_filters, age_reliability_masks,
+                                       apply_filters, per_label_masks,
                                        load_golden)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
@@ -93,7 +93,7 @@ except ImportError:
     from run_sweep import finite_label_mapping
     from sweep_cannon import _label_matrix, cross_validate, _summarize
     from sweep_config import (DEFAULT_ABUNDANCES, add_filter_arg,
-                             apply_filters, age_reliability_masks, load_golden)
+                             apply_filters, per_label_masks, load_golden)
 
 logger = logging.getLogger("thecannon.select_labels")
 
@@ -318,7 +318,7 @@ def load(args):
     # on identical stars (a fair comparison, at the cost of some dropped stars).
     mapping, finite = finite_label_mapping(label_source, union)
     age_masks = {age: mask[finite]
-                 for age, mask in age_reliability_masks(label_source).items()}
+                 for age, mask in per_label_masks(label_source).items()}
     return (mapping, flux[finite], ivar[finite], dispersion, int(finite.sum()),
             tuple(core), tuple(candidates), age_masks)
 

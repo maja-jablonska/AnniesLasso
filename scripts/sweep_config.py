@@ -144,6 +144,61 @@ def age_reliability_masks(label_source, mapping=None):
     return out
 
 
+def _element_of(col):
+    """ The element token of an abundance label: ``mg_fe``/``raw_mg_h`` -> "mg"
+    (also iron via ``raw_fe_h`` -> "fe"); ``None`` for non-abundance labels. """
+    import re
+    c = str(col).lower()
+    m = re.fullmatch(r"([a-z]{1,2})_fe", c)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"raw_([a-z]{1,2})_h", c)
+    if m:
+        return m.group(1)
+    return None
+
+
+def abundance_flag_masks(label_source):
+    """
+    Return ``{label_col: bool_array}`` where the mask is True for stars whose
+    ASPCAP abundance flag for that element is 0 (unflagged). Recognises the flag
+    column ``<EL>_FE_FLAG`` or ``<EL>_H_FLAG`` (case-insensitive); labels with no
+    flag column present are omitted (so they impose no cut).
+    """
+    columns = getattr(label_source, "columns", None)
+    cols = list(columns) if columns is not None else []
+    if not cols:
+        return {}
+    lut = {str(c).lower(): c for c in cols}
+    out = {}
+    for col in cols:
+        element = _element_of(col)
+        if element is None:
+            continue
+        for cand in ("{0}_fe_flag".format(element), "{0}_h_flag".format(element)):
+            if cand in lut:
+                flags = np.asarray(label_source[lut[cand]])
+                # NaN -> treat as unflagged (0); otherwise 0 == good.
+                flags = np.where(np.equal(flags, flags), flags, 0)
+                out[col] = np.asarray(flags).astype("float64") == 0
+                break
+    return out
+
+
+def per_label_masks(label_source):
+    """
+    Combined per-label "OK to use this star" masks: the age/mass reliability
+    flags (:func:`age_reliability_masks`) AND the abundance flags
+    (:func:`abundance_flag_masks`), keyed by label column. A label set is cut to
+    the stars for which every present key it fits is OK (see
+    :func:`label_set_row_mask`).
+    """
+    masks = age_reliability_masks(label_source)
+    for col, mask in abundance_flag_masks(label_source).items():
+        masks[col] = (masks[col] & mask) if col in masks else mask
+    return masks
+
+
 def label_set_row_mask(label_names, age_masks):
     """
     Boolean row mask selecting stars for which every age column present in

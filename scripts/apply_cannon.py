@@ -69,12 +69,14 @@ try:
                                        quality_mask, DEFAULT_DATA_DIR,
                                        DEFAULT_SPECTRA, DEFAULT_CONTINUUM_LIST,
                                        DEFAULT_LABELS)
-    from scripts.sweep_config import add_filter_arg, filter_mask
+    from scripts.sweep_config import (add_filter_arg, filter_mask,
+                                       per_label_masks, label_set_row_mask)
 except ImportError:
     from train_cannon import (load_spectra, normalize_spectra, quality_mask,
                               DEFAULT_DATA_DIR, DEFAULT_SPECTRA,
                               DEFAULT_CONTINUUM_LIST, DEFAULT_LABELS)
-    from sweep_config import add_filter_arg, filter_mask
+    from sweep_config import (add_filter_arg, filter_mask, per_label_masks,
+                             label_set_row_mask)
 
 logger = logging.getLogger("thecannon.apply")
 
@@ -165,11 +167,17 @@ def train_and_apply(label_source, normalized_flux, normalized_ivar, dispersion,
     else:
         eligible = np.ones(len(label_array), dtype=bool)
 
-    # Row filters (e.g. Rel_age_Dnu==True, snr>100) gate the TRAINING set only;
-    # the trained model is still applied to every star in the sample below.
+    # Row filters (e.g. snr>100) gate the TRAINING set only; the trained model
+    # is still applied to every star in the sample below.
     if config.get("filters"):
         eligible = eligible & filter_mask(
             label_source, config["filters"], log=logger)
+
+    # Per-label eligibility for the fitted labels: age/mass reliability
+    # (RelAge_*) and abundance flags (X_FE_FLAG==0). Also training-set only.
+    row_mask = label_set_row_mask(label_names, per_label_masks(label_source))
+    if row_mask is not None:
+        eligible = eligible & np.asarray(row_mask, dtype=bool)
 
     train_set = select_training_set(
         label_array, eligible, config["train_frac"], config["seed"])

@@ -69,6 +69,16 @@ DEFAULT_LABELS = ["raw_teff", "raw_logg", "raw_fe_h", "raw_mg_h", "raw_ce_h",
                   "age_L", "mass_L"]
 APOGEE_REGIONS = ([15090, 15822], [15823, 16451], [16452, 16971])
 CONTINUUM_L = 1400
+
+# APOGEE DR17 bitmask bits and thresholds for the quality cut.
+ASPCAPFLAG_STAR_BAD = 23                     # ASPCAPFLAG: overall bad-fit bit
+STARFLAG_BAD_BITS = {                        # STARFLAG bits worth rejecting
+    2: "BRIGHT_NEIGHBOR", 3: "VERY_BRIGHT_NEIGHBOR", 4: "LOW_SNR",
+    9: "PERSIST_HIGH", 10: "PERSIST_MED",
+    12: "PERSIST_JUMP_POS", 13: "PERSIST_JUMP_NEG",
+    16: "SUSPECT_RV_COMBINATION", 17: "SUSPECT_BROAD_LINES",
+}
+VSCATTER_MAX = 0.5                           # km/s; above this = likely binary
 CONTINUUM_ORDER = 3
 
 
@@ -113,11 +123,33 @@ def add_x_fe_columns(table):
     return table
 
 
+def _find_column(table, *names):
+    """ Return the actual column of ``table`` matching any of ``names`` (case-
+    insensitive), or ``None``. """
+    lut = {str(c).lower(): c for c in table.columns}
+    for name in names:
+        if name.lower() in lut:
+            return lut[name.lower()]
+    return None
+
+
+def _bitmask_bad(series, bad_bits):
+    """ Boolean array: True where any of ``bad_bits`` is set in the integer
+    bitmask ``series`` (NaN treated as 0 = clean). """
+    values = np.asarray(series.fillna(0)).astype("int64")
+    bad = np.zeros(values.shape, dtype=bool)
+    for bit in bad_bits:
+        bad |= ((values >> int(bit)) & 1).astype(bool)
+    return bad
+
+
 def quality_mask(table):
     """
     Boolean mask over the rows of ``table`` selecting stars that pass the
-    quality cuts: ``spectrum_flags == 0`` (no flagged reduction/calibration
-    issues) and no ``warn_*`` column set to True. Missing columns skip the
+    quality cuts: ``spectrum_flags == 0``, no ``warn_*`` column True, and the
+    APOGEE flag cuts -- ``ASPCAPFLAG`` STAR_BAD, the bad ``STARFLAG`` bits
+    (persistence / bright neighbour / low S/N / suspect RV or broad lines), and
+    ``VSCATTER`` <= VSCATTER_MAX (drop likely binaries). Missing columns skip the
     corresponding cut with a warning rather than rejecting everything.
     """
     n = len(table)
@@ -139,6 +171,34 @@ def quality_mask(table):
                     "%s set", int(mask.sum()), n, ", ".join(warn_columns))
     else:
         logger.warning("no warn_* columns; skipping that quality cut")
+
+    # --- APOGEE ASPCAPFLAG / STARFLAG bitmasks + VSCATTER -----------------
+    aspcap = _find_column(table, "ASPCAPFLAG", "aspcap_flag")
+    if aspcap is not None:
+        bad = _bitmask_bad(table[aspcap], [ASPCAPFLAG_STAR_BAD])
+        logger.info("quality cut: %d/%d rejected by ASPCAPFLAG STAR_BAD",
+                    int(bad.sum()), n)
+        mask &= ~bad
+    else:
+        logger.warning("no ASPCAPFLAG column; skipping the STAR_BAD cut")
+
+    starflag = _find_column(table, "STARFLAG", "star_flag")
+    if starflag is not None:
+        bad = _bitmask_bad(table[starflag], STARFLAG_BAD_BITS)
+        logger.info("quality cut: %d/%d rejected by STARFLAG bits %s",
+                    int(bad.sum()), n, sorted(STARFLAG_BAD_BITS))
+        mask &= ~bad
+    else:
+        logger.warning("no STARFLAG column; skipping the STARFLAG cut")
+
+    vscatter = _find_column(table, "VSCATTER", "v_scatter")
+    if vscatter is not None:
+        bad = np.asarray((table[vscatter] > VSCATTER_MAX).fillna(False))
+        logger.info("quality cut: %d/%d rejected by VSCATTER > %.2f km/s",
+                    int(bad.sum()), n, VSCATTER_MAX)
+        mask &= ~bad
+    else:
+        logger.warning("no VSCATTER column; skipping the binary cut")
 
     return mask
 

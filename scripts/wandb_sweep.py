@@ -100,11 +100,11 @@ import numpy as np
 # import at module top even for the network-light controller role.
 try:
     from scripts.sweep_config import (add_label_builder_args, add_filter_arg,
-                                       apply_filters, age_reliability_masks,
+                                       apply_filters, per_label_masks,
                                        load_golden)
 except ImportError:
     from sweep_config import (add_label_builder_args, add_filter_arg,
-                             apply_filters, age_reliability_masks, load_golden)
+                             apply_filters, per_label_masks, load_golden)
 
 logger = logging.getLogger("thecannon.wandb_sweep")
 
@@ -495,7 +495,7 @@ def _load_data(args):
         name for label_set in label_sets for name in label_set))
     mapping, finite = finite_label_mapping(label_source, label_union)
     age_masks = {age: mask[finite]
-                 for age, mask in age_reliability_masks(label_source).items()}
+                 for age, mask in per_label_masks(label_source).items()}
     return (mapping, flux[finite], ivar[finite], dispersion, label_sets,
             n_splits, age_masks)
 
