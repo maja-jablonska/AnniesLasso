@@ -84,6 +84,34 @@ def add_filter_arg(parser):
     return parser
 
 
+def _column_hint(label_source, expr):
+    """
+    Build a " Did you mean ..." hint for a failed filter: the table columns whose
+    name shares a word-part with the query (case-insensitive), so a wrong /
+    mis-cased column name is easy to correct. Falls back to a truncated column
+    list. Returns an empty string if columns are unavailable.
+    """
+    import re
+    columns = getattr(label_source, "columns", None)
+    cols = list(columns) if columns is not None else []
+    if not cols:
+        return ""
+    skip = {"true", "false", "and", "or", "not", "in", "none"}
+    parts = set()
+    for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr):
+        if tok.lower() in skip:
+            continue
+        for p in tok.lower().split("_"):
+            if len(p) >= 2:
+                parts.add(p)
+    near = [c for c in cols if any(p in str(c).lower() for p in parts)]
+    shown = near if near else cols
+    listed = ", ".join(map(str, shown[:40]))
+    more = "" if len(shown) <= 40 else " (+{0} more)".format(len(shown) - 40)
+    label = "similarly-named columns" if near else "available columns"
+    return " {0}: {1}{2}".format(label, listed, more)
+
+
 def filter_mask(label_source, filters, log=None):
     """
     Boolean mask over the rows of ``label_source`` (a pandas DataFrame) selecting
@@ -100,8 +128,8 @@ def filter_mask(label_source, filters, log=None):
         try:
             m = np.asarray(label_source.eval(expr), dtype=bool)
         except Exception as exc:
-            raise ValueError("could not apply --filter {0!r}: {1}".format(
-                expr, exc))
+            raise ValueError("could not apply --filter {0!r}: {1}.{2}".format(
+                expr, exc, _column_hint(label_source, expr)))
         if m.shape != mask.shape:
             raise ValueError(
                 "--filter {0!r} did not yield one boolean per row (got shape "
