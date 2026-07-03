@@ -17,12 +17,14 @@
 #PBS -N cannon-select-labels
 #PBS -P mk27
 #PBS -q rsaa
-#PBS -l ncpus=16
+#PBS -l ncpus=32
 #PBS -l mem=64GB
-#PBS -l walltime=02:00:00
-#PBS -l storage=scratch/mk27+gdata/mk27
+#PBS -l walltime=12:00:00
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27
 #PBS -l wd
 #PBS -j oe
+#PBS -m bea
+#PBS -M maja.jablonska@anu.edu.au
 
 set -uo pipefail
 
