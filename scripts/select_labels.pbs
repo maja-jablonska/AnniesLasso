@@ -29,7 +29,7 @@ set -uo pipefail
 # ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 # Absolute path to the Python interpreter (conda/venv) with thecannon installed.
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
 # Data.
 SPECTRA="${SPECTRA:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet}"
 CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list}"
@@ -63,7 +63,7 @@ ${PYTHON_BIN} -m scripts.select_labels \
     --continuum-list "${CONTINUUM_LIST}" \
     --core "${CORE}" \
     --candidates "${CANDIDATES}" \
-    --filter "snr>100" \
+    --filter "snr_x>100" \
     "${target_arg[@]}" \
     --order "${ORDER}" \
     --regularization "${REGULARIZATION}" \

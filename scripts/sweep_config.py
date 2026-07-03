@@ -72,15 +72,17 @@ def add_label_builder_args(parser):
 def add_filter_arg(parser):
     """
     Add the repeatable ``--filter`` row-selection argument: each value is a
-    pandas query on the label table (e.g. ``"Rel_age_Dnu == True"``) that the
-    training / cross-validation pool must satisfy. Multiple filters are ANDed.
+    pandas query on the label table (e.g. ``"snr_x > 100"``) that the training /
+    cross-validation pool must satisfy. Multiple filters are ANDed. (The per-age
+    reliability and abundance-flag cuts are applied automatically, per label set;
+    see :func:`per_label_masks`.)
     """
     parser.add_argument("--filter", dest="filters", action="append",
                         default=None, metavar="QUERY",
                         help="row filter as a pandas query on the label table, "
-                             "e.g. \"Rel_age_Dnu == True\" (repeatable; all must "
-                             "pass). Applied to the training/CV pool before "
-                             "continuum normalization.")
+                             "e.g. \"snr_x > 100\" (repeatable; all must pass). "
+                             "Applied to the training/CV pool before continuum "
+                             "normalization.")
     return parser
 
 

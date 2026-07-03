@@ -384,7 +384,7 @@ def run(labels, normalized_flux, normalized_ivar, dispersion, label_names,
 
 def _run_real(args):
     spectra, dispersion, flux, ivar = load_spectra(args.spectra)
-    # Optional row filters on the label table (e.g. Rel_age_Dnu==True, snr>100).
+    # Optional row filters on the label table (e.g. snr_x>100).
     spectra, flux, ivar = apply_filters(
         spectra, flux, ivar, args.filters, log=logger)
     normalized_flux, normalized_ivar = normalize_spectra(

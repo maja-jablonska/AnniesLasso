@@ -91,7 +91,7 @@ broker). Keep it modest (2–4) — heavy parallelism dilutes the Bayesian feedb
 The worker applies these before cross-validating; watch its log for the
 `row filters kept N/M` and `quality cut: N/M rejected by ...` lines:
 
-- **`--filter snr>100`** — explicit in the worker PBS (global S/N cut).
+- **`--filter snr_x>100`** — explicit in the worker PBS (global S/N cut).
 - **`quality_mask`** — `ASPCAPFLAG` STAR_BAD, bad `STARFLAG` bits, `VSCATTER > 0.5`
   (plus `spectrum_flags`/`warn_*` if present).
 - **Age reliability, per label set** — a set fitting `age_Dnu` is cut on
