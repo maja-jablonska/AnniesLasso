@@ -41,16 +41,22 @@ WANDB_PROJECT="cannon-bayes"
 COUNT=40                       # trials this controller session runs
 METRIC="mean_r2"
 GOAL="maximize"
-# Candidate label sets (repeat --label-set). Explicit here so the controller
-# needs no data; alternatively omit them and it will read the worker-published
-# $BROKER/label_sets.json.
-# Every set includes an age column (age_L) so age is fit and the per-set
-# RelAge_L reliability cut applies; swap to age_Dnu (RelAge_Dnu) as needed.
-LABEL_SETS=(
-    "raw_teff,raw_logg,raw_fe_h,age_L"
-    "raw_teff,raw_logg,raw_fe_h,mg_fe,age_L"
-    "raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe,age_L"
-)
+# Candidate label sets, built one-abundance-at-a-time from CORE x AGE_COLS x
+# ABUNDANCES -- so "test more abundances" is just editing the ABUNDANCES list.
+# Every set includes an age column, so age is fit and the per-set RelAge cut
+# applies (RelAge_L for age_L, RelAge_Dnu for age_Dnu). An abundance whose
+# raw_<x>_h column is absent only yields failed trials, so keep the list to what
+# the parquet actually has (peek the schema, or screen first with select_labels).
+CORE="raw_teff,raw_logg,raw_fe_h"
+AGE_COLS=(age_L age_Dnu)
+ABUNDANCES=(mg_fe ce_fe ca_fe si_fe ni_fe mn_fe al_fe c_fe n_fe)
+LABEL_SETS=()
+for age in "${AGE_COLS[@]}"; do
+    LABEL_SETS+=("${CORE},${age}")                 # baseline: age, no abundance
+    for ab in "${ABUNDANCES[@]}"; do
+        LABEL_SETS+=("${CORE},${age},${ab}")       # one abundance at a time
+    done
+done
 ORDERS="1,2"
 REG_MIN="1e0"
 REG_MAX="1e5"
