@@ -44,10 +44,12 @@ GOAL="maximize"
 # Candidate label sets (repeat --label-set). Explicit here so the controller
 # needs no data; alternatively omit them and it will read the worker-published
 # $BROKER/label_sets.json.
+# Every set includes an age column (age_L) so age is fit and the per-set
+# RelAge_L reliability cut applies; swap to age_Dnu (RelAge_Dnu) as needed.
 LABEL_SETS=(
-    "raw_teff,raw_logg,raw_fe_h"
-    "raw_teff,raw_logg,raw_fe_h,mg_fe"
-    "raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe"
+    "raw_teff,raw_logg,raw_fe_h,age_L"
+    "raw_teff,raw_logg,raw_fe_h,mg_fe,age_L"
+    "raw_teff,raw_logg,raw_fe_h,mg_fe,ce_fe,age_L"
 )
 ORDERS="1,2"
 REG_MIN="1e0"
