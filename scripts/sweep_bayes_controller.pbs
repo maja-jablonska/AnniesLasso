@@ -27,7 +27,7 @@
 #PBS -l ncpus=1
 #PBS -l mem=8GB
 #PBS -l walltime=10:00:00
-#PBS -l storage=scratch/mk27+gdata/mk27
+#PBS -l storage=scratch/mk27+scratch/y89
 #PBS -l wd
 #PBS -j oe
 
