@@ -340,6 +340,59 @@ def load(args):
 #  Reporting                                                                   #
 # --------------------------------------------------------------------------- #
 
+def log_wandb(args, rows, chosen, metric, goal):
+    """
+    Log the whole selection as a single (offline by default) W&B run: the
+    per-evaluation scalar metrics, the tidy table, and the chosen set in the
+    run summary. No-op unless ``--wandb-project`` is given.
+    """
+    if not args.wandb_project:
+        return
+    try:
+        from scripts.sweep_cannon import wandb, _init_wandb_run
+    except ImportError:
+        from sweep_cannon import wandb, _init_wandb_run
+    if wandb is None:
+        logger.warning("wandb is not installed; skipping W&B logging")
+        return
+
+    name = "select-{0}".format(args.mode)
+    if args.target:
+        name += "-{0}".format(args.target)
+    config = dict(
+        mode=args.mode, core=list(args.core),
+        candidates=list(args.candidates), target=args.target,
+        objective_metric=metric, goal=goal, order=args.order,
+        regularization=args.regularization, n_splits=args.n_splits,
+        seed=args.seed, filters=args.filters, min_gain=args.min_gain,
+        max_size=args.max_size, spectra=args.spectra)
+    run = _init_wandb_run(args.wandb_project, None, None, args.wandb_mode,
+                          None, name=name, config=config)
+    if run is None:
+        return
+
+    for row in rows:
+        run.log({k: v for k, v in row.items()
+                 if isinstance(v, (int, float)) and not isinstance(v, bool)})
+
+    columns = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    data = [[row.get(c) for c in columns] for row in rows]
+    try:
+        run.log({"selection": wandb.Table(columns=columns, data=data)})
+    except Exception as exc:                            # pragma: no cover
+        logger.warning("could not log the selection table: %s", exc)
+
+    run.summary["objective_metric"] = metric
+    run.summary["goal"] = goal
+    if chosen is not None:
+        run.summary["chosen_label_set"] = "+".join(chosen)
+    run.finish()
+
+
 def report(rows, chosen, metric, goal, output):
     import pandas as pd
     df = pd.DataFrame(rows)
@@ -401,6 +454,11 @@ def main():
     parser.add_argument("--max-evals", type=int, default=512,
                         help="subsets: refuse to evaluate more than this many")
     parser.add_argument("--output", default="label_selection.csv")
+    parser.add_argument("--wandb-project", default=None,
+                        help="log the selection to this W&B project")
+    parser.add_argument("--wandb-mode", default="offline",
+                        choices=["offline", "online", "disabled"],
+                        help="W&B run mode (default: offline)")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -434,6 +492,7 @@ def main():
                        args.max_extra, args.max_evals)
 
     report(rows, chosen, metric, goal, args.output)
+    log_wandb(args, rows, chosen, metric, goal)
 
 
 if __name__ == "__main__":

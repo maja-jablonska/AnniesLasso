@@ -4,8 +4,9 @@
 #
 #  Same as scripts/select_labels.pbs but on the GPU: the Cannon train/test steps
 #  are jax.vmap-vectorized, so a full-resolution screen (8575 px x ~10k stars)
-#  that crawls on rsaa runs far faster here. Pure compute -- no internet/W&B --
-#  so it just writes the selection CSV.
+#  that crawls on rsaa runs far faster here. Writes the selection CSV and logs
+#  an offline W&B run (compute nodes have no internet); a copyq sync job is
+#  submitted afterwards to upload it.
 #
 #  REQUIRES a CUDA-enabled jaxlib in ${PYTHON_BIN} (e.g. `pip install
 #  "jax[cuda12]"`). The backend check below fails loudly if the GPU backend is
@@ -44,6 +45,7 @@ REGULARIZATION="${REGULARIZATION:-0}"
 N_SPLITS="${N_SPLITS:-3}"                      # 3 folds for a faster screen (5 elsewhere)
 SEED="${SEED:-0}"
 OUTPUT="${OUTPUT:-${PROJECT_DIR}/label_selection_${MODE}.csv}"
+WANDB_PROJECT="${WANDB_PROJECT:-cannon-select}"   # empty = no W&B logging
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"
@@ -64,8 +66,16 @@ EOF
 # Let GPU allocations grow instead of grabbing 75% up front.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+# Keep W&B fully offline on the compute node; runs are uploaded later on copyq.
+export WANDB_MODE=offline
+export WANDB_DIR="${PROJECT_DIR}/wandb"
+mkdir -p "${WANDB_DIR}"
+
 target_arg=()
 [ -n "${TARGET}" ] && target_arg=(--target "${TARGET}")
+wandb_arg=()
+[ -n "${WANDB_PROJECT}" ] && \
+    wandb_arg=(--wandb-project "${WANDB_PROJECT}" --wandb-mode offline)
 
 echo "[$(date)] starting GPU label selection (mode=${MODE}) on $(hostname)"
 
@@ -77,6 +87,7 @@ ${PYTHON_BIN} -m scripts.select_labels \
     --candidates "${CANDIDATES}" \
     --filter "snr_x>100" \
     "${target_arg[@]}" \
+    "${wandb_arg[@]}" \
     --order "${ORDER}" \
     --regularization "${REGULARIZATION}" \
     --n-splits "${N_SPLITS}" \
@@ -85,5 +96,20 @@ ${PYTHON_BIN} -m scripts.select_labels \
     -v
 rc=$?
 
-echo "[$(date)] GPU label selection finished with exit code ${rc}; wrote ${OUTPUT}"
+if [ ${rc} -eq 0 ]; then
+    echo "[$(date)] GPU label selection succeeded; wrote ${OUTPUT}"
+else
+    echo "[$(date)] GPU label selection FAILED with exit code ${rc}"
+fi
+
+# Upload whatever offline W&B runs exist via copyq (which has internet), even
+# if the selection failed partway.
+if [ -n "${WANDB_PROJECT}" ]; then
+    echo "[$(date)] submitting copyq W&B sync job"
+    sync_job=$(qsub \
+        -v "PROJECT_DIR=${PROJECT_DIR},PYTHON_BIN=${PYTHON_BIN},WANDB_DIR=${WANDB_DIR}" \
+        "${PROJECT_DIR}/scripts/sync_wandb.pbs")
+    echo "[$(date)] submitted sync job: ${sync_job}"
+fi
+
 exit ${rc}
