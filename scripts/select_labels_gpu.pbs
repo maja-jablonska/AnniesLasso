@@ -53,13 +53,12 @@ cd "${PROJECT_DIR}"
 export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
 mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
 
-# Use the GPU; fail loudly if the CUDA backend is missing (don't crawl on CPU).
+# Fail the job immediately if there is no CUDA/GPU backend (don't crawl on CPU).
 unset JAX_PLATFORMS
-${PYTHON_BIN} - <<'EOF'
-import jax
+${PYTHON_BIN} - <<'EOF' || { echo "[$(date)] ERROR: no CUDA/GPU JAX backend; aborting"; exit 1; }
+import jax, sys
 print("JAX backend:", jax.default_backend(), jax.devices())
-assert jax.default_backend() == "gpu", \
-    "no GPU backend -- is a CUDA jaxlib installed in this environment?"
+sys.exit(0 if jax.default_backend() == "gpu" else 1)
 EOF
 
 # Let GPU allocations grow instead of grabbing 75% up front.

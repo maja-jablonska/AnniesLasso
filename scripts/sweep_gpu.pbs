@@ -50,15 +50,13 @@ cd "${PROJECT_DIR}"
 export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
 mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
 
-# Let JAX pick the GPU; fall back loudly (rather than silently training on
-# CPU for hours) if the CUDA backend is unavailable.
+# Fail the job immediately if there is no CUDA/GPU backend (rather than silently
+# training on CPU for hours).
 unset JAX_PLATFORMS
-${PYTHON_BIN} - <<'EOF'
-import jax
-devices = jax.devices()
-print("JAX backend:", jax.default_backend(), devices)
-assert jax.default_backend() == "gpu", \
-    "no GPU backend -- is a CUDA jaxlib installed in this environment?"
+${PYTHON_BIN} - <<'EOF' || { echo "[$(date)] ERROR: no CUDA/GPU JAX backend; aborting"; exit 1; }
+import jax, sys
+print("JAX backend:", jax.default_backend(), jax.devices())
+sys.exit(0 if jax.default_backend() == "gpu" else 1)
 EOF
 
 # The default is to grab 75% of GPU memory up front; the sweep's batch sizes
