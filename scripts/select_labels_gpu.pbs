@@ -27,15 +27,17 @@
 #                     scripts/select_labels_gpu.pbs
 # ===========================================================================
 #PBS -N cannon-select-gpu
-#PBS -P mk27
-#PBS -q gpuvolta
+#PBS -P dg97
+#PBS -q gpursaa
 #PBS -l ngpus=1
-#PBS -l ncpus=12
+#PBS -l ncpus=14
 #PBS -l mem=95GB
 #PBS -l walltime=48:00:00
 #PBS -l storage=scratch/mk27+scratch/y89
 #PBS -l wd
 #PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
 
 set -uo pipefail
 
