@@ -1,19 +1,30 @@
 #!/bin/bash
 # ===========================================================================
-#  Cannon label-column selection -- single-GPU PBS job (gpuvolta).
+#  Cannon label-column selection -- multi-scenario single-GPU PBS job (gpuvolta).
 #
-#  Same as scripts/select_labels.pbs but on the GPU: the Cannon train/test steps
-#  are jax.vmap-vectorized, so a full-resolution screen (8575 px x ~10k stars)
-#  that crawls on rsaa runs far faster here. Writes the selection CSV and logs
-#  an offline W&B run (compute nodes have no internet); a copyq sync job is
-#  submitted afterwards to upload it.
+#  Runs a battery of label-selection scenarios *sequentially* on one GPU (each
+#  train/test step is jax.vmap-vectorized, so a single scenario already
+#  saturates the device). The persistent XLA cache carries compilations across
+#  scenarios and jobs, so repeated shapes only compile once.
 #
-#  REQUIRES a CUDA-enabled jaxlib in ${PYTHON_BIN} (e.g. `pip install
-#  "jax[cuda12]"`). The backend check below fails loudly if the GPU backend is
-#  unavailable rather than silently crawling on CPU.
+#  Each scenario is a colon-separated spec:
+#
+#      name:mode:target:snr:order:reg
+#
+#  where ``mode`` is screen|forward|subsets, ``target`` may be empty (objective
+#  becomes mean_r2), ``snr`` is the snr_x lower cut, and ``order``/``reg`` are
+#  the fixed polynomial order and L1 regularization. Each scenario writes
+#  ${PROJECT_DIR}/label_selection_<name>.csv and logs an offline W&B run named
+#  select-<name> (compute nodes have no internet); one copyq sync job uploads
+#  every offline run at the end, even if some scenarios failed.
+#
+#  The default battery screens both age targets and the target-free objective,
+#  probes the SNR cut, order and regularization around the baseline, then runs
+#  greedy forward selection for the same three objectives.
 #
 #  Submit with:   qsub scripts/select_labels_gpu.pbs
-#  or override:   qsub -v N_SPLITS=5,CANDIDATES=mg_fe,ce_fe,o_fe scripts/select_labels_gpu.pbs
+#  or override:   qsub -v SCENARIOS="quick:screen:age_Dnu:100:2:0" \
+#                     scripts/select_labels_gpu.pbs
 # ===========================================================================
 #PBS -N cannon-select-gpu
 #PBS -P mk27
@@ -21,7 +32,7 @@
 #PBS -l ngpus=1
 #PBS -l ncpus=12
 #PBS -l mem=95GB
-#PBS -l walltime=05:00:00
+#PBS -l walltime=48:00:00
 #PBS -l storage=scratch/mk27+scratch/y89
 #PBS -l wd
 #PBS -j oe
@@ -35,17 +46,25 @@ PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
 # Data.
 SPECTRA="${SPECTRA:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet}"
 CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list}"
-# Selection setup.
-MODE="${MODE:-screen}"                        # screen | forward | subsets
+# Shared selection setup.
 CORE="${CORE:-raw_teff,raw_logg,raw_fe_h}"
 CANDIDATES="${CANDIDATES:-mg_fe,ce_fe,ca_fe,si_fe,ni_fe,mn_fe,al_fe,c_fe,n_fe,o_fe,ti_fe,s_fe,k_fe,cr_fe,na_fe,co_fe,v_fe,cu_fe,p_fe,nd_fe}"
-TARGET="${TARGET:-age_Dnu}"                    # optimize r2_<TARGET>; empty = mean_r2
-ORDER="${ORDER:-2}"
-REGULARIZATION="${REGULARIZATION:-0}"
-N_SPLITS="${N_SPLITS:-3}"                      # 3 folds for a faster screen (5 elsewhere)
+N_SPLITS="${N_SPLITS:-3}"                      # 3 folds for a faster battery
 SEED="${SEED:-0}"
-OUTPUT="${OUTPUT:-${PROJECT_DIR}/label_selection_${MODE}.csv}"
+MAX_SIZE="${MAX_SIZE:-10}"                     # forward: cap on total labels
 WANDB_PROJECT="${WANDB_PROJECT:-cannon-select}"   # empty = no W&B logging
+# Scenario battery: name:mode:target:snr:order:reg (space-separated specs).
+SCENARIOS="${SCENARIOS:-\
+screen_age_dnu:screen:age_Dnu:100:2:0 \
+screen_age_l:screen:age_L:100:2:0 \
+screen_mean:screen::100:2:0 \
+screen_age_dnu_snr50:screen:age_Dnu:50:2:0 \
+screen_age_dnu_order1:screen:age_Dnu:100:1:0 \
+screen_age_dnu_order3:screen:age_Dnu:100:3:0 \
+screen_age_dnu_reg1e2:screen:age_Dnu:100:2:1e2 \
+forward_age_dnu:forward:age_Dnu:100:2:0 \
+forward_age_l:forward:age_L:100:2:0 \
+forward_mean:forward::100:2:0}"
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"
@@ -71,39 +90,57 @@ export WANDB_MODE=offline
 export WANDB_DIR="${PROJECT_DIR}/wandb"
 mkdir -p "${WANDB_DIR}"
 
-target_arg=()
-[ -n "${TARGET}" ] && target_arg=(--target "${TARGET}")
-wandb_arg=()
-[ -n "${WANDB_PROJECT}" ] && \
-    wandb_arg=(--wandb-project "${WANDB_PROJECT}" --wandb-mode offline)
+overall_rc=0
+summary=()
 
-echo "[$(date)] starting GPU label selection (mode=${MODE}) on $(hostname)"
+for spec in ${SCENARIOS}; do
+    IFS=':' read -r name mode target snr order reg <<< "${spec}"
+    if [ -z "${name}" ] || [ -z "${mode}" ] || [ -z "${snr}" ] || \
+       [ -z "${order}" ] || [ -z "${reg}" ]; then
+        echo "[$(date)] ERROR: bad scenario spec '${spec}' (want name:mode:target:snr:order:reg)"
+        overall_rc=1
+        summary+=("BADSPEC ${spec}")
+        continue
+    fi
 
-${PYTHON_BIN} -m scripts.select_labels \
-    --mode "${MODE}" \
-    --spectra "${SPECTRA}" \
-    --continuum-list "${CONTINUUM_LIST}" \
-    --core "${CORE}" \
-    --candidates "${CANDIDATES}" \
-    --filter "snr_x>100" \
-    "${target_arg[@]}" \
-    "${wandb_arg[@]}" \
-    --order "${ORDER}" \
-    --regularization "${REGULARIZATION}" \
-    --n-splits "${N_SPLITS}" \
-    --seed "${SEED}" \
-    --output "${OUTPUT}" \
-    -v
-rc=$?
+    output="${PROJECT_DIR}/label_selection_${name}.csv"
+    args=( --mode "${mode}"
+           --spectra "${SPECTRA}"
+           --continuum-list "${CONTINUUM_LIST}"
+           --core "${CORE}"
+           --candidates "${CANDIDATES}"
+           --filter "snr_x>${snr}"
+           --order "${order}"
+           --regularization "${reg}"
+           --n-splits "${N_SPLITS}"
+           --seed "${SEED}"
+           --output "${output}"
+           -v )
+    [ -n "${target}" ] && args+=( --target "${target}" )
+    [ "${mode}" = "forward" ] && [ -n "${MAX_SIZE}" ] && \
+        args+=( --max-size "${MAX_SIZE}" )
+    [ -n "${WANDB_PROJECT}" ] && \
+        args+=( --wandb-project "${WANDB_PROJECT}" --wandb-mode offline
+                --wandb-name "select-${name}" )
 
-if [ ${rc} -eq 0 ]; then
-    echo "[$(date)] GPU label selection succeeded; wrote ${OUTPUT}"
-else
-    echo "[$(date)] GPU label selection FAILED with exit code ${rc}"
-fi
+    echo "[$(date)] === scenario ${name}: mode=${mode} target=${target:-'(mean_r2)'} snr_x>${snr} order=${order} reg=${reg} ==="
+    ${PYTHON_BIN} -m scripts.select_labels "${args[@]}"
+    rc=$?
+    if [ ${rc} -eq 0 ]; then
+        echo "[$(date)] scenario ${name} OK; wrote ${output}"
+        summary+=("OK      ${name}")
+    else
+        echo "[$(date)] scenario ${name} FAILED with exit code ${rc}"
+        summary+=("FAILED  ${name} (rc=${rc})")
+        overall_rc=1
+    fi
+done
+
+echo "[$(date)] ===== scenario summary ====="
+printf '%s\n' "${summary[@]}"
 
 # Upload whatever offline W&B runs exist via copyq (which has internet), even
-# if the selection failed partway.
+# if some scenarios failed.
 if [ -n "${WANDB_PROJECT}" ]; then
     echo "[$(date)] submitting copyq W&B sync job"
     sync_job=$(qsub \
@@ -112,4 +149,4 @@ if [ -n "${WANDB_PROJECT}" ]; then
     echo "[$(date)] submitted sync job: ${sync_job}"
 fi
 
-exit ${rc}
+exit ${overall_rc}

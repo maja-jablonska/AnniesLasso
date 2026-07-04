@@ -356,9 +356,11 @@ def log_wandb(args, rows, chosen, metric, goal):
         logger.warning("wandb is not installed; skipping W&B logging")
         return
 
-    name = "select-{0}".format(args.mode)
-    if args.target:
-        name += "-{0}".format(args.target)
+    name = args.wandb_name
+    if not name:
+        name = "select-{0}".format(args.mode)
+        if args.target:
+            name += "-{0}".format(args.target)
     config = dict(
         mode=args.mode, core=list(args.core),
         candidates=list(args.candidates), target=args.target,
@@ -459,6 +461,8 @@ def main():
     parser.add_argument("--wandb-mode", default="offline",
                         choices=["offline", "online", "disabled"],
                         help="W&B run mode (default: offline)")
+    parser.add_argument("--wandb-name", default=None,
+                        help="W&B run name (default: select-<mode>[-<target>])")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
