@@ -230,8 +230,8 @@ def main():
         label_source = label_source[good]
         flux, ivar = flux[good], ivar[good]
 
-        # Optional row filters on the label table (e.g. snr_x > 100). The age /
-        # abundance-flag cuts are automatic (per label set), not via --filter.
+        # Optional row filters on the label table (e.g. snr_x > 100). The age
+        # reliability cuts are automatic (per label set), not via --filter.
         label_source, flux, ivar = apply_filters(
             label_source, flux, ivar, args.filters, log=logger)
 

@@ -174,7 +174,7 @@ def train_and_apply(label_source, normalized_flux, normalized_ivar, dispersion,
             label_source, config["filters"], log=logger)
 
     # Per-label eligibility for the fitted labels: age/mass reliability
-    # (RelAge_*) and abundance flags (X_FE_FLAG==0). Also training-set only.
+    # (RelAge_*). Also training-set only.
     row_mask = label_set_row_mask(label_names, per_label_masks(label_source))
     if row_mask is not None:
         eligible = eligible & np.asarray(row_mask, dtype=bool)

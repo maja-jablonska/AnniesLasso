@@ -74,8 +74,8 @@ def add_filter_arg(parser):
     Add the repeatable ``--filter`` row-selection argument: each value is a
     pandas query on the label table (e.g. ``"snr_x > 100"``) that the training /
     cross-validation pool must satisfy. Multiple filters are ANDed. (The per-age
-    reliability and abundance-flag cuts are applied automatically, per label set;
-    see :func:`per_label_masks`.)
+    reliability cuts are applied automatically, per label set; see
+    :func:`per_label_masks`.)
     """
     parser.add_argument("--filter", dest="filters", action="append",
                         default=None, metavar="QUERY",
@@ -191,16 +191,14 @@ def abundance_flag_masks(label_source):
 
 def per_label_masks(label_source):
     """
-    Combined per-label "OK to use this star" masks: the age/mass reliability
-    flags (:func:`age_reliability_masks`) AND the abundance flags
-    (:func:`abundance_flag_masks`), keyed by label column. A label set is cut to
-    the stars for which every present key it fits is OK (see
-    :func:`label_set_row_mask`).
+    Per-label "OK to use this star" masks: the age/mass reliability flags
+    (:func:`age_reliability_masks`), keyed by label column. A label set is cut
+    to the stars for which every present key it fits is OK (see
+    :func:`label_set_row_mask`). The per-element ASPCAP abundance flags
+    (:func:`abundance_flag_masks`) are deliberately not applied -- they cut
+    the training pool too harshly.
     """
-    masks = age_reliability_masks(label_source)
-    for col, mask in abundance_flag_masks(label_source).items():
-        masks[col] = (masks[col] & mask) if col in masks else mask
-    return masks
+    return age_reliability_masks(label_source)
 
 
 def label_set_row_mask(label_names, age_masks):
