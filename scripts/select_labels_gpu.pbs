@@ -38,7 +38,7 @@ CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbit
 MODE="${MODE:-screen}"                        # screen | forward | subsets
 CORE="${CORE:-raw_teff,raw_logg,raw_fe_h}"
 CANDIDATES="${CANDIDATES:-mg_fe,ce_fe,ca_fe,si_fe,ni_fe,mn_fe,al_fe,c_fe,n_fe,o_fe,ti_fe,s_fe,k_fe,cr_fe,na_fe,co_fe,v_fe,cu_fe,p_fe,nd_fe}"
-TARGET="${TARGET:-age_L}"                      # optimize r2_<TARGET>; empty = mean_r2
+TARGET="${TARGET:-age_Dnu}"                    # optimize r2_<TARGET>; empty = mean_r2
 ORDER="${ORDER:-2}"
 REGULARIZATION="${REGULARIZATION:-0}"
 N_SPLITS="${N_SPLITS:-3}"                      # 3 folds for a faster screen (5 elsewhere)
