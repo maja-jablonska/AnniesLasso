@@ -43,6 +43,10 @@ SPECTRA="${SPECTRA:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_
 CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list}"
 # Seismic table for the RGB classifier; empty = train on the input sample.
 CLASSIFIER_TRAIN="${CLASSIFIER_TRAIN:-}"
+# Classifier feature space: labels, spectra, or both (labels + PCA of the
+# normalized spectra; the spectral CN/CH features separate RC from RGB).
+CLASSIFIER_FEATURES="${CLASSIFIER_FEATURES:-both}"
+CLASSIFIER_COMPONENTS="${CLASSIFIER_COMPONENTS:-50}"
 MIN_PROBA="${MIN_PROBA:-0.9}"
 OUTPUT="${OUTPUT:-${PROJECT_DIR}/results/rgb_ages.csv}"
 TEST_BATCH_SIZE="${TEST_BATCH_SIZE:-}"       # empty = memory-aware auto
@@ -74,6 +78,8 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 args=( --model "${MODEL}"
        --spectra "${SPECTRA}"
        --continuum-list "${CONTINUUM_LIST}"
+       --classifier-features "${CLASSIFIER_FEATURES}"
+       --classifier-components "${CLASSIFIER_COMPONENTS}"
        --min-proba "${MIN_PROBA}"
        --output "${OUTPUT}"
        -v )
