@@ -9,13 +9,18 @@ loads an already-trained pickled model, selects the first-ascent RGB stars,
 runs the test step on them only, and writes a per-star age catalogue.
 
 RGB selection uses the seismic evolutionary state where available
-(``EvoState`` == 1) and falls back to a gradient-boosting classifier in
-Teff / log g / [Fe/H] / [C/Fe] / [N/Fe] / [Mg/Fe] space for stars without one,
-accepting only predictions with probability above ``--min-proba``. The
-classifier is trained on the seismically labeled rows of ``--classifier-train``
-(default: the input sample itself, so a mixed seismic+unknown table needs no
-extra file; a pure target sample, e.g. bulge stars, should point this at the
-seismic training parquet).
+(``EvoState`` == 1) and falls back to a gradient-boosting classifier for stars
+without one, accepting only predictions with probability above ``--min-proba``.
+The classifier features are set by ``--classifier-features``: the label space
+(Teff / log g / [Fe/H] / [C/Fe] / [N/Fe] / [Mg/Fe]), a PCA compression of the
+continuum-normalized spectra (the CN/CH molecular features that make RC and
+RGB stars spectroscopically separable; Hawkins+2018, Ting+2018), or both (the
+default). The classifier is trained on the seismically labeled rows of
+``--classifier-train`` (default: the input sample itself, so a mixed
+seismic+unknown table needs no extra file; a pure target sample, e.g. bulge
+stars, should point this at the seismic training parquet) and its stratified
+cross-validated accuracy, ROC AUC, and RGB purity/completeness at the
+acceptance threshold are logged before it is trusted.
 
 The spectra are pseudo-continuum-normalized with the same continuum pixel list
 and chip regions used in training -- the model is only valid on spectra
@@ -65,6 +70,8 @@ logger = logging.getLogger("thecannon.apply_rgb")
 
 RGB, HEB = 1, 2
 EVO_FEATURES = ["raw_teff", "raw_logg", "raw_fe_h", "c_fe", "n_fe", "mg_fe"]
+CLASSIFIER_FEATURE_MODES = ("labels", "spectra", "both")
+DEFAULT_SPECTRAL_COMPONENTS = 50
 
 
 def seismic_state(table):
@@ -76,46 +83,179 @@ def seismic_state(table):
     return state.where(state.isin([RGB, HEB]))
 
 
-def fit_state_classifier(train_table, min_labeled=200):
+def clean_flux(normalized_flux, normalized_ivar=None):
+    """
+    Continuum-fill (flux = 1) the unusable pixels -- non-finite flux or, when
+    ``normalized_ivar`` is given, zero inverse variance -- and clip artifacts,
+    so PCA sees finite values and bad pixels do not dominate the variance.
+    """
+    flux = np.array(normalized_flux, dtype=float)
+    bad = ~np.isfinite(flux)
+    if normalized_ivar is not None:
+        bad |= ~(np.asarray(normalized_ivar) > 0)
+    flux[bad] = 1.0
+    return np.clip(flux, 0.0, 3.0)
+
+
+def classifier_matrix(table, normalized_flux=None, normalized_ivar=None,
+                      features="both"):
+    """
+    Raw feature matrix for the evolutionary-state classifier: the label
+    columns (``EVO_FEATURES``), the cleaned normalized flux, or both side by
+    side. The spectral block stays uncompressed here -- the PCA lives inside
+    the classifier pipeline so cross-validation refits it per fold.
+    """
+    if features not in CLASSIFIER_FEATURE_MODES:
+        raise ValueError("unknown classifier features {0!r}".format(features))
+    parts = []
+    if features in ("labels", "both"):
+        parts.append(table[EVO_FEATURES].to_numpy(dtype=float))
+    if features in ("spectra", "both"):
+        if normalized_flux is None:
+            raise ValueError("features={0!r} needs normalized spectra"
+                             .format(features))
+        parts.append(clean_flux(normalized_flux, normalized_ivar))
+    return np.hstack(parts)
+
+
+def _make_estimator(features, n_components):
+    """ The classifier pipeline: gradient boosting on the label columns
+    (passed through) and a PCA compression of the spectral block. """
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    gbm = HistGradientBoostingClassifier(max_iter=300, random_state=0)
+    if features == "labels":
+        return gbm
+
+    from sklearn.compose import ColumnTransformer
+    from sklearn.decomposition import PCA
+    from sklearn.pipeline import Pipeline
+
+    pca = PCA(n_components=n_components, random_state=0)
+    if features == "spectra":
+        return Pipeline([("pca", pca), ("gbm", gbm)])
+    reduce = ColumnTransformer(
+        [("labels", "passthrough", slice(0, len(EVO_FEATURES))),
+         ("spectra", pca, slice(len(EVO_FEATURES), None))])
+    return Pipeline([("features", reduce), ("gbm", gbm)])
+
+
+def _report_cv(estimator, X, y, labeled_table, min_proba, features):
+    """
+    Log honest (stratified cross-validated) accuracy estimates before the
+    classifier is trusted: overall accuracy and ROC AUC, RGB purity and
+    completeness at the ``min_proba`` acceptance threshold, and the accuracy
+    inside the ambiguous clump box (the only region where the answer is not
+    obvious from log g alone, so the global number is inflated by easy stars).
+    """
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+    classes, counts = np.unique(y, return_counts=True)
+    n_splits = int(min(5, counts.min()))
+    if n_splits < 2:
+        logger.warning("too few stars in the rarest class (%d) to "
+                       "cross-validate the classifier", int(counts.min()))
+        return
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+    proba = cross_val_predict(estimator, X, y, cv=cv, method="predict_proba")
+    p_rgb = proba[:, list(classes).index(RGB)]
+    predicted = classes[proba.argmax(axis=1)]
+    correct = predicted == y
+
+    accepted = p_rgb > min_proba
+    purity = (float((y[accepted] == RGB).mean()) if accepted.any()
+              else float("nan"))
+    completeness = float(accepted[y == RGB].mean())
+    logger.info("classifier CV (%d-fold, features=%s): accuracy %.3f, "
+                "ROC AUC %.3f; at p > %.2f: RGB purity %.3f, "
+                "completeness %.3f (%d/%d accepted)",
+                n_splits, features, float(correct.mean()),
+                float(roc_auc_score(y == RGB, p_rgb)), min_proba, purity,
+                completeness, int(accepted.sum()), len(y))
+
+    logg = np.asarray(labeled_table["raw_logg"], dtype=float)
+    teff = np.asarray(labeled_table["raw_teff"], dtype=float)
+    box = (logg > 2.2) & (logg < 2.7) & (teff > 4500) & (teff < 5100)
+    if box.any():
+        logger.info("classifier CV clump-box accuracy (2.2 < logg < 2.7, "
+                    "4500 < Teff < 5100 K): %.3f (n=%d)",
+                    float(correct[box].mean()), int(box.sum()))
+
+
+def fit_state_classifier(train_table, normalized_flux=None,
+                         normalized_ivar=None, features="both",
+                         n_components=DEFAULT_SPECTRAL_COMPONENTS,
+                         min_proba=0.9, min_labeled=200):
     """
     Fit the RGB/HeB classifier on the seismically labeled rows of
     ``train_table`` and return it (or ``None`` if too few labeled stars).
+    Spectral feature modes need the training spectra as ``normalized_flux`` /
+    ``normalized_ivar`` (aligned with the table rows); if they are absent the
+    classifier falls back to label features with a warning. The fitted
+    estimator records the mode actually used as ``features_used_``.
     """
-    from sklearn.ensemble import HistGradientBoostingClassifier
-
     state = seismic_state(train_table)
-    labeled = state.notna()
+    labeled = state.notna().to_numpy()
     if labeled.sum() < min_labeled:
         logger.warning("only %d seismically labeled stars in the classifier "
                        "training table (< %d); skipping classification",
                        int(labeled.sum()), min_labeled)
         return None
 
-    X = train_table.loc[labeled, EVO_FEATURES].to_numpy(dtype=float)
+    if features != "labels" and normalized_flux is None:
+        logger.warning("no spectra available for the classifier training "
+                       "table; falling back to label features only")
+        features = "labels"
+
     y = state[labeled].to_numpy()
-    clf = HistGradientBoostingClassifier(max_iter=300, random_state=0)
+    flux = ivar = None
+    if features != "labels":
+        flux = np.asarray(normalized_flux)[labeled]
+        if normalized_ivar is not None:
+            ivar = np.asarray(normalized_ivar)[labeled]
+        n_components = int(min(n_components, flux.shape[1], len(y) - 1))
+    X = classifier_matrix(train_table.loc[labeled], flux, ivar, features)
+
+    clf = _make_estimator(features, n_components)
+    _report_cv(clf, X, y, train_table.loc[labeled], min_proba, features)
     clf.fit(X, y)
+    clf.features_used_ = features
     logger.info("state classifier trained on %d labeled stars "
-                "(%d RGB, %d HeB)", len(y), int((y == RGB).sum()),
-                int((y == HEB).sum()))
+                "(%d RGB, %d HeB; features=%s)", len(y),
+                int((y == RGB).sum()), int((y == HEB).sum()), features)
     return clf
 
 
-def select_rgb(table, classifier, min_proba):
+def select_rgb(table, classifier, min_proba, normalized_flux=None,
+               normalized_ivar=None):
     """
     Return ``(is_rgb, source, rgb_proba)`` arrays over the rows of ``table``:
     a boolean RGB mask, how each star was identified (``"seismic"``,
     ``"classified"`` or ``""``), and the classifier RGB probability (NaN for
-    seismically identified stars).
+    seismically identified stars). ``normalized_flux`` / ``normalized_ivar``
+    (aligned with the table rows) are required when the classifier was
+    trained with spectral features.
     """
     state = seismic_state(table)
-    is_rgb = (state == RGB).to_numpy()
+    # copy=True: under pandas copy-on-write, to_numpy() may return a read-only
+    # view, and this mask is assigned into below.
+    is_rgb = (state == RGB).to_numpy(copy=True)
     source = np.where(state.notna(), "seismic", "")
     rgb_proba = np.full(len(table), np.nan)
 
     unknown = state.isna().to_numpy()
     if unknown.any() and classifier is not None:
-        X = table.loc[unknown, EVO_FEATURES].to_numpy(dtype=float)
+        features = getattr(classifier, "features_used_", "labels")
+        flux = ivar = None
+        if features != "labels":
+            if normalized_flux is None:
+                raise ValueError("the classifier uses spectral features but "
+                                 "no normalized spectra were passed")
+            flux = np.asarray(normalized_flux)[unknown]
+            if normalized_ivar is not None:
+                ivar = np.asarray(normalized_ivar)[unknown]
+        X = classifier_matrix(table.loc[unknown], flux, ivar, features)
         proba = classifier.predict_proba(X)
         p_rgb = proba[:, list(classifier.classes_).index(RGB)]
         rgb_proba[unknown] = p_rgb
@@ -134,6 +274,34 @@ def select_rgb(table, classifier, min_proba):
                 int((source == "classified").sum()),
                 int(is_rgb.sum()), len(table))
     return is_rgb, source, rgb_proba
+
+
+def load_classifier_table(path, want_spectra, dispersion, continuum_list_path):
+    """
+    Load the ``--classifier-train`` parquet, returning ``(table,
+    normalized_flux, normalized_ivar)``. When ``want_spectra`` the spectra are
+    continuum-normalized identically to the sample; a table without usable
+    spectra columns degrades to ``(table, None, None)`` with a warning (the
+    classifier then uses label features only).
+    """
+    import pandas as pd
+
+    if want_spectra:
+        try:
+            table, train_dispersion, flux, ivar = load_spectra(path)
+        except (KeyError, ValueError, AssertionError) as e:
+            logger.warning("classifier training table %s has no usable "
+                           "spectra (%s); using label features only", path, e)
+            return add_x_fe_columns(pd.read_parquet(path)), None, None
+        if train_dispersion.size != dispersion.size:
+            raise ValueError(
+                "classifier training spectra have {0} pixels but the sample "
+                "has {1}; they are on different wavelength grids".format(
+                    train_dispersion.size, dispersion.size))
+        normalized_flux, normalized_ivar = normalize_spectra(
+            train_dispersion, flux, ivar, continuum_list_path)
+        return table, normalized_flux, normalized_ivar
+    return add_x_fe_columns(pd.read_parquet(path)), None, None
 
 
 def apply_model(model, table, normalized_flux, normalized_ivar, source,
@@ -203,6 +371,16 @@ def main():
     parser.add_argument("--classifier-train", default=None,
                         help="parquet with seismic EvoState rows to train the "
                              "RGB classifier on (default: the input sample)")
+    parser.add_argument("--classifier-features", default="both",
+                        choices=CLASSIFIER_FEATURE_MODES,
+                        help="feature space of the RGB classifier: stellar "
+                             "labels, PCA-compressed normalized spectra, or "
+                             "both (default: both)")
+    parser.add_argument("--classifier-components", type=int,
+                        default=DEFAULT_SPECTRAL_COMPONENTS,
+                        help="number of PCA components kept from the spectra "
+                             "(default: {0})".format(
+                                 DEFAULT_SPECTRAL_COMPONENTS))
     parser.add_argument("--min-proba", type=float, default=0.9,
                         help="classifier probability above which an unlabeled "
                              "star is accepted as RGB (default: 0.9)")
@@ -234,34 +412,55 @@ def main():
             "spectra are on a different wavelength grid".format(
                 dispersion.size, np.asarray(model.dispersion).size))
 
-    keep = np.ones(len(table), dtype=bool)
     if not args.no_quality_cut:
-        keep &= np.asarray(quality_mask(table), dtype=bool)
+        keep = np.asarray(quality_mask(table), dtype=bool)
         logger.info("quality cuts keep %d/%d stars", int(keep.sum()),
                     len(table))
+        table, flux, ivar = table.loc[keep], flux[keep], ivar[keep]
+        if len(table) == 0:
+            raise ValueError("no stars survive the quality cuts")
+
+    # With spectral classifier features the whole (quality-cut) sample is
+    # normalized once, up front: the unknown-state stars need it for
+    # classification, and the test step reuses the RGB rows.
+    use_spectra = args.classifier_features != "labels"
+    normalized_flux = normalized_ivar = None
+    if use_spectra:
+        normalized_flux, normalized_ivar = normalize_spectra(
+            dispersion, flux, ivar, args.continuum_list)
 
     # RGB selection: seismic state first, classifier fallback for the rest.
     if args.classifier_train:
-        import pandas as pd
-        classifier_table = add_x_fe_columns(
-            pd.read_parquet(args.classifier_train))
+        classifier_table, classifier_flux, classifier_ivar = \
+            load_classifier_table(args.classifier_train, use_spectra,
+                                  dispersion, args.continuum_list)
     else:
         classifier_table = table
-    classifier = fit_state_classifier(classifier_table)
-    is_rgb, source, rgb_proba = select_rgb(table, classifier, args.min_proba)
-    keep &= is_rgb
-    if keep.sum() == 0:
+        classifier_flux, classifier_ivar = normalized_flux, normalized_ivar
+    classifier = fit_state_classifier(
+        classifier_table, classifier_flux, classifier_ivar,
+        features=args.classifier_features,
+        n_components=args.classifier_components, min_proba=args.min_proba)
+    is_rgb, source, rgb_proba = select_rgb(
+        table, classifier, args.min_proba, normalized_flux, normalized_ivar)
+    if is_rgb.sum() == 0:
         raise ValueError("no RGB stars survive the selection; check the "
                          "EvoState column, the classifier training table, or "
                          "--min-proba")
 
-    # Normalize only the selected stars, identically to training.
-    normalized_flux, normalized_ivar = normalize_spectra(
-        dispersion, flux[keep], ivar[keep], args.continuum_list)
+    # Normalize only the selected stars, identically to training (already
+    # done above when the classifier consumed spectra).
+    if normalized_flux is None:
+        normalized_flux, normalized_ivar = normalize_spectra(
+            dispersion, flux[is_rgb], ivar[is_rgb], args.continuum_list)
+    else:
+        normalized_flux = normalized_flux[is_rgb]
+        normalized_ivar = normalized_ivar[is_rgb]
 
     catalogue = apply_model(
-        model, table.loc[keep], normalized_flux, normalized_ivar,
-        source[keep], rgb_proba[keep], test_batch_size=args.test_batch_size)
+        model, table.loc[is_rgb], normalized_flux, normalized_ivar,
+        source[is_rgb], rgb_proba[is_rgb],
+        test_batch_size=args.test_batch_size)
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
     os.makedirs(out_dir, exist_ok=True)
