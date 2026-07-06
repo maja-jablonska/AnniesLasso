@@ -1,0 +1,89 @@
+#!/bin/bash
+# ===========================================================================
+#  Apply a saved CannonModel to RGB stars -- single-GPU PBS job (gpursaa).
+#
+#  Runs scripts/apply_rgb_ages.py: loads an already-trained pickled model,
+#  selects the RGB stars of the sample (seismic EvoState where available,
+#  gradient-boosting classifier fallback accepted at p > MIN_PROBA), continuum-
+#  normalizes them identically to training, and writes a per-star age
+#  catalogue (age_gyr, age_gyr_err, all Cannon labels + errors, chi_sq).
+#
+#  Inference only -- no training -- so this is a short job; the GPU is used by
+#  the vmapped test step. Pure compute, no internet or W&B needed.
+#
+#  Submit with:   qsub -v MODEL=/path/to/model.pkl scripts/apply_rgb_ages.pbs
+#  or override:   qsub -v MODEL=...,SPECTRA=/path/to/bulge.parquet,\
+#                     CLASSIFIER_TRAIN=/path/to/merged_with_ages_raw.parquet,\
+#                     OUTPUT=$PWD/results/bulge_rgb_ages.csv \
+#                     scripts/apply_rgb_ages.pbs
+# ===========================================================================
+#PBS -N cannon-rgb-ages
+#PBS -P dg97
+#PBS -q gpursaa
+#PBS -l ngpus=1
+#PBS -l ncpus=14
+#PBS -l mem=95GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27
+#PBS -l wd
+#PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
+
+set -uo pipefail
+
+# ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to a Python with thecannon + a CUDA jaxlib installed.
+PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
+# The trained pickled CannonModel to apply.
+MODEL="${MODEL:-${PROJECT_DIR}/scr_mk27/trained_cannon_model_temp.pkl}"
+# Data.
+SPECTRA="${SPECTRA:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet}"
+CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list}"
+# Seismic table for the RGB classifier; empty = train on the input sample.
+CLASSIFIER_TRAIN="${CLASSIFIER_TRAIN:-}"
+MIN_PROBA="${MIN_PROBA:-0.9}"
+OUTPUT="${OUTPUT:-${PROJECT_DIR}/results/rgb_ages.csv}"
+TEST_BATCH_SIZE="${TEST_BATCH_SIZE:-}"       # empty = memory-aware auto
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+if [ ! -f "${MODEL}" ]; then
+    echo "[$(date)] ERROR: no model at ${MODEL}; pass MODEL=/path/to/model.pkl"
+    exit 1
+fi
+
+# Persistent XLA compilation cache on /scratch, shared across jobs, so repeated
+# runs skip recompiling the same-shape test programs.
+export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
+mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
+
+# Fail the job immediately if there is no CUDA/GPU backend (don't crawl on CPU).
+unset JAX_PLATFORMS
+${PYTHON_BIN} - <<'EOF' || { echo "[$(date)] ERROR: no CUDA/GPU JAX backend; aborting"; exit 1; }
+import jax, sys
+print("JAX backend:", jax.default_backend(), jax.devices())
+sys.exit(0 if jax.default_backend() == "gpu" else 1)
+EOF
+
+# Let GPU allocations grow instead of grabbing 75% up front.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+args=( --model "${MODEL}"
+       --spectra "${SPECTRA}"
+       --continuum-list "${CONTINUUM_LIST}"
+       --min-proba "${MIN_PROBA}"
+       --output "${OUTPUT}"
+       -v )
+[ -n "${CLASSIFIER_TRAIN}" ] && args+=( --classifier-train "${CLASSIFIER_TRAIN}" )
+[ -n "${TEST_BATCH_SIZE}" ] && args+=( --test-batch-size "${TEST_BATCH_SIZE}" )
+
+echo "[$(date)] applying ${MODEL} to RGB stars of ${SPECTRA} on $(hostname)"
+
+${PYTHON_BIN} -m scripts.apply_rgb_ages "${args[@]}"
+rc=$?
+
+echo "[$(date)] age inference finished with exit code ${rc}; wrote ${OUTPUT}"
+exit ${rc}
