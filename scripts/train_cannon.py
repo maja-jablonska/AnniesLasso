@@ -41,11 +41,13 @@ from __future__ import (division, print_function, absolute_import,
 import argparse
 import logging
 import os
+import sys
 
 import numpy as np
 
 import matplotlib
-matplotlib.use("Agg")              # headless: only saves figures
+if "ipykernel" not in sys.modules:  # keep notebook inline backends intact
+    matplotlib.use("Agg")           # headless: only saves figures
 import matplotlib.pyplot as plt
 
 import thecannon as tc
