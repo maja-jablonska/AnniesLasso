@@ -39,7 +39,7 @@ Usage
         --spectra /path/to/target_sample.parquet \\
         --continuum-list /path/to/continuum.list \\
         --classifier-train /path/to/merged_with_ages_raw.parquet \\
-        --output results/rgb_ages.csv
+        --output results/rgb_ages.parquet
 """
 
 from __future__ import (division, print_function, absolute_import,
@@ -241,7 +241,8 @@ def select_rgb(table, classifier, min_proba, normalized_flux=None,
     # copy=True: under pandas copy-on-write, to_numpy() may return a read-only
     # view, and this mask is assigned into below.
     is_rgb = (state == RGB).to_numpy(copy=True)
-    source = np.where(state.notna(), "seismic", "")
+    # Widen the dtype past "seismic" or assigning "classified" truncates it.
+    source = np.where(state.notna(), "seismic", "").astype("<U10")
     rgb_proba = np.full(len(table), np.nan)
 
     unknown = state.isna().to_numpy()
@@ -386,8 +387,9 @@ def main():
                              "star is accepted as RGB (default: 0.9)")
     parser.add_argument("--no-quality-cut", action="store_true",
                         help="skip the spectrum_flags / warn_* quality cuts")
-    parser.add_argument("--output", default="rgb_ages.csv",
-                        help="output catalogue path (.csv or .parquet)")
+    parser.add_argument("--output", default="rgb_ages.parquet",
+                        help="output catalogue path (parquet; a .csv suffix "
+                             "writes CSV instead)")
     parser.add_argument("--test-batch-size", type=int, default=None,
                         help="spectra fit per batch in the test step; lower it "
                              "if the device OOMs (default: memory-aware auto)")
@@ -464,10 +466,10 @@ def main():
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
     os.makedirs(out_dir, exist_ok=True)
-    if args.output.endswith(".parquet"):
-        catalogue.to_parquet(args.output, index=False)
-    else:
+    if args.output.endswith(".csv"):
         catalogue.to_csv(args.output, index=False)
+    else:
+        catalogue.to_parquet(args.output, index=False)
     logger.info("wrote %d-star age catalogue to %s", len(catalogue),
                 args.output)
 

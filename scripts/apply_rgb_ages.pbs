@@ -14,7 +14,7 @@
 #  Submit with:   qsub -v MODEL=/path/to/model.pkl scripts/apply_rgb_ages.pbs
 #  or override:   qsub -v MODEL=...,SPECTRA=/path/to/bulge.parquet,\
 #                     CLASSIFIER_TRAIN=/path/to/merged_with_ages_raw.parquet,\
-#                     OUTPUT=$PWD/results/bulge_rgb_ages.csv \
+#                     OUTPUT=$PWD/results/bulge_rgb_ages.parquet \
 #                     scripts/apply_rgb_ages.pbs
 # ===========================================================================
 #PBS -N cannon-rgb-ages
@@ -48,7 +48,7 @@ CLASSIFIER_TRAIN="${CLASSIFIER_TRAIN:-}"
 CLASSIFIER_FEATURES="${CLASSIFIER_FEATURES:-both}"
 CLASSIFIER_COMPONENTS="${CLASSIFIER_COMPONENTS:-50}"
 MIN_PROBA="${MIN_PROBA:-0.9}"
-OUTPUT="${OUTPUT:-${PROJECT_DIR}/results/rgb_ages.csv}"
+OUTPUT="${OUTPUT:-${PROJECT_DIR}/results/rgb_ages.parquet}"
 TEST_BATCH_SIZE="${TEST_BATCH_SIZE:-}"       # empty = memory-aware auto
 # ---------------------------------------------------------------------------
 
