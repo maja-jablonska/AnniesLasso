@@ -2,15 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-Apply a saved CannonModel to the RGB stars of a sample and estimate their ages.
+Apply a saved CannonModel to one evolutionary state of a sample (first-ascent
+RGB by default, red clump via ``--evo-state heb``) and estimate stellar ages.
 
 Unlike :mod:`scripts.apply_cannon` (which trains a model first), this script
-loads an already-trained pickled model, selects the first-ascent RGB stars,
-runs the test step on them only, and writes a per-star age catalogue.
+loads an already-trained pickled model, selects the stars in the requested
+evolutionary state, runs the test step on them only, and writes a per-star age
+catalogue. The state must match the population the model was trained on --
+the script cannot tell from the pickle, so name your models accordingly
+(e.g. ``cannon_rgb_order2.pkl`` vs ``cannon_rc_order2.pkl``).
 
-RGB selection uses the seismic evolutionary state where available
-(``EvoState`` == 1) and falls back to a gradient-boosting classifier for stars
-without one, accepting only predictions with probability above ``--min-proba``.
+State selection uses the seismic evolutionary state where available
+(``EvoState``: 1 = RGB, 2 = HeB) and falls back to a gradient-boosting
+classifier for stars without one, accepting only predictions with the
+target-state probability above ``--min-proba``.
 The classifier features are set by ``--classifier-features``: the label space
 (Teff / log g / [Fe/H] / [C/Fe] / [N/Fe] / [Mg/Fe]), a PCA compression of the
 continuum-normalized spectra (the CN/CH molecular features that make RC and
@@ -69,6 +74,8 @@ except ImportError:
 logger = logging.getLogger("thecannon.apply_rgb")
 
 RGB, HEB = 1, 2
+STATE_CODES = {"rgb": RGB, "heb": HEB}
+STATE_LABELS = {RGB: "RGB", HEB: "HeB"}
 EVO_FEATURES = ["raw_teff", "raw_logg", "raw_fe_h", "c_fe", "n_fe", "mg_fe"]
 CLASSIFIER_FEATURE_MODES = ("labels", "spectra", "both")
 DEFAULT_SPECTRAL_COMPONENTS = 50
@@ -140,13 +147,15 @@ def _make_estimator(features, n_components):
     return Pipeline([("features", reduce), ("gbm", gbm)])
 
 
-def _report_cv(estimator, X, y, labeled_table, min_proba, features):
+def _report_cv(estimator, X, y, labeled_table, min_proba, features,
+               target=RGB):
     """
     Log honest (stratified cross-validated) accuracy estimates before the
-    classifier is trusted: overall accuracy and ROC AUC, RGB purity and
-    completeness at the ``min_proba`` acceptance threshold, and the accuracy
-    inside the ambiguous clump box (the only region where the answer is not
-    obvious from log g alone, so the global number is inflated by easy stars).
+    classifier is trusted: overall accuracy and ROC AUC, target-state purity
+    and completeness at the ``min_proba`` acceptance threshold, and the
+    accuracy inside the ambiguous clump box (the only region where the answer
+    is not obvious from log g alone, so the global number is inflated by easy
+    stars).
     """
     from sklearn.metrics import roc_auc_score
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
@@ -159,20 +168,21 @@ def _report_cv(estimator, X, y, labeled_table, min_proba, features):
         return
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
     proba = cross_val_predict(estimator, X, y, cv=cv, method="predict_proba")
-    p_rgb = proba[:, list(classes).index(RGB)]
+    p_target = proba[:, list(classes).index(target)]
     predicted = classes[proba.argmax(axis=1)]
     correct = predicted == y
 
-    accepted = p_rgb > min_proba
-    purity = (float((y[accepted] == RGB).mean()) if accepted.any()
+    accepted = p_target > min_proba
+    purity = (float((y[accepted] == target).mean()) if accepted.any()
               else float("nan"))
-    completeness = float(accepted[y == RGB].mean())
+    completeness = float(accepted[y == target].mean())
     logger.info("classifier CV (%d-fold, features=%s): accuracy %.3f, "
-                "ROC AUC %.3f; at p > %.2f: RGB purity %.3f, "
+                "ROC AUC %.3f; at p > %.2f: %s purity %.3f, "
                 "completeness %.3f (%d/%d accepted)",
                 n_splits, features, float(correct.mean()),
-                float(roc_auc_score(y == RGB, p_rgb)), min_proba, purity,
-                completeness, int(accepted.sum()), len(y))
+                float(roc_auc_score(y == target, p_target)), min_proba,
+                STATE_LABELS[target], purity, completeness,
+                int(accepted.sum()), len(y))
 
     logg = np.asarray(labeled_table["raw_logg"], dtype=float)
     teff = np.asarray(labeled_table["raw_teff"], dtype=float)
@@ -186,7 +196,7 @@ def _report_cv(estimator, X, y, labeled_table, min_proba, features):
 def fit_state_classifier(train_table, normalized_flux=None,
                          normalized_ivar=None, features="both",
                          n_components=DEFAULT_SPECTRAL_COMPONENTS,
-                         min_proba=0.9, min_labeled=200):
+                         min_proba=0.9, min_labeled=200, target=RGB):
     """
     Fit the RGB/HeB classifier on the seismically labeled rows of
     ``train_table`` and return it (or ``None`` if too few labeled stars).
@@ -218,7 +228,8 @@ def fit_state_classifier(train_table, normalized_flux=None,
     X = classifier_matrix(train_table.loc[labeled], flux, ivar, features)
 
     clf = _make_estimator(features, n_components)
-    _report_cv(clf, X, y, train_table.loc[labeled], min_proba, features)
+    _report_cv(clf, X, y, train_table.loc[labeled], min_proba, features,
+               target=target)
     clf.fit(X, y)
     clf.features_used_ = features
     logger.info("state classifier trained on %d labeled stars "
@@ -227,23 +238,25 @@ def fit_state_classifier(train_table, normalized_flux=None,
     return clf
 
 
-def select_rgb(table, classifier, min_proba, normalized_flux=None,
-               normalized_ivar=None):
+def select_state(table, classifier, min_proba, normalized_flux=None,
+                 normalized_ivar=None, target=RGB):
     """
-    Return ``(is_rgb, source, rgb_proba)`` arrays over the rows of ``table``:
-    a boolean RGB mask, how each star was identified (``"seismic"``,
-    ``"classified"`` or ``""``), and the classifier RGB probability (NaN for
-    seismically identified stars). ``normalized_flux`` / ``normalized_ivar``
-    (aligned with the table rows) are required when the classifier was
-    trained with spectral features.
+    Return ``(is_target, source, state_proba)`` arrays over the rows of
+    ``table``: a boolean mask of stars in the ``target`` evolutionary state
+    (RGB or HEB), how each star was identified (``"seismic"``,
+    ``"classified"`` or ``""``), and the classifier target-state probability
+    (NaN for seismically identified stars). ``normalized_flux`` /
+    ``normalized_ivar`` (aligned with the table rows) are required when the
+    classifier was trained with spectral features.
     """
+    name = STATE_LABELS[target]
     state = seismic_state(table)
     # copy=True: under pandas copy-on-write, to_numpy() may return a read-only
     # view, and this mask is assigned into below.
-    is_rgb = (state == RGB).to_numpy(copy=True)
+    is_target = (state == target).to_numpy(copy=True)
     # Widen the dtype past "seismic" or assigning "classified" truncates it.
     source = np.where(state.notna(), "seismic", "").astype("<U10")
-    rgb_proba = np.full(len(table), np.nan)
+    state_proba = np.full(len(table), np.nan)
 
     unknown = state.isna().to_numpy()
     if unknown.any() and classifier is not None:
@@ -258,23 +271,23 @@ def select_rgb(table, classifier, min_proba, normalized_flux=None,
                 ivar = np.asarray(normalized_ivar)[unknown]
         X = classifier_matrix(table.loc[unknown], flux, ivar, features)
         proba = classifier.predict_proba(X)
-        p_rgb = proba[:, list(classifier.classes_).index(RGB)]
-        rgb_proba[unknown] = p_rgb
-        accepted = p_rgb > min_proba
-        is_rgb[unknown] = accepted
+        p_target = proba[:, list(classifier.classes_).index(target)]
+        state_proba[unknown] = p_target
+        accepted = p_target > min_proba
+        is_target[unknown] = accepted
         source[unknown] = np.where(accepted, "classified", "")
-        logger.info("classifier: %d/%d unlabeled stars accepted as RGB "
+        logger.info("classifier: %d/%d unlabeled stars accepted as %s "
                     "(p > %.2f)", int(accepted.sum()), int(unknown.sum()),
-                    min_proba)
+                    name, min_proba)
     elif unknown.any():
         logger.warning("%d stars have no evolutionary state and no classifier "
                        "is available; they are dropped", int(unknown.sum()))
 
-    logger.info("RGB selection: %d seismic + %d classified = %d of %d stars",
-                int((state == RGB).sum()),
+    logger.info("%s selection: %d seismic + %d classified = %d of %d stars",
+                name, int((state == target).sum()),
                 int((source == "classified").sum()),
-                int(is_rgb.sum()), len(table))
-    return is_rgb, source, rgb_proba
+                int(is_target.sum()), len(table))
+    return is_target, source, state_proba
 
 
 def load_classifier_table(path, want_spectra, dispersion, continuum_list_path):
@@ -306,9 +319,9 @@ def load_classifier_table(path, want_spectra, dispersion, continuum_list_path):
 
 
 def apply_model(model, table, normalized_flux, normalized_ivar, source,
-    rgb_proba, test_batch_size=None):
+    state_proba, target=RGB, test_batch_size=None):
     """
-    Run the model's test step on the (already RGB-selected, normalized)
+    Run the model's test step on the (already state-selected, normalized)
     spectra and return the per-star age catalogue as a DataFrame.
     """
     import pandas as pd
@@ -340,8 +353,9 @@ def apply_model(model, table, normalized_flux, normalized_ivar, source,
         columns["star_index"] = np.asarray(table.index)
         logger.warning("no identifier column found; using row index instead")
 
+    columns["target_state"] = np.full(len(table), STATE_LABELS[target])
     columns["evo_state_source"] = source
-    columns["rgb_proba"] = rgb_proba
+    columns["state_proba"] = state_proba
     for i, name in enumerate(label_names):
         columns["{0}_cannon".format(name)] = predicted[:, i]
         columns["{0}_cannon_err".format(name)] = sigma[:, i]
@@ -369,9 +383,15 @@ def main():
     parser.add_argument("--continuum-list", default=DEFAULT_CONTINUUM_LIST,
                         help="text file of continuum pixel indices (must be "
                              "the one used to train the model)")
+    parser.add_argument("--evo-state", default="rgb",
+                        choices=sorted(STATE_CODES),
+                        help="evolutionary state to select and estimate ages "
+                             "for: rgb (first-ascent) or heb (red clump); "
+                             "must match the population the model was "
+                             "trained on (default: rgb)")
     parser.add_argument("--classifier-train", default=None,
                         help="parquet with seismic EvoState rows to train the "
-                             "RGB classifier on (default: the input sample)")
+                             "state classifier on (default: the input sample)")
     parser.add_argument("--classifier-features", default="both",
                         choices=CLASSIFIER_FEATURE_MODES,
                         help="feature space of the RGB classifier: stellar "
@@ -439,29 +459,32 @@ def main():
     else:
         classifier_table = table
         classifier_flux, classifier_ivar = normalized_flux, normalized_ivar
+    target = STATE_CODES[args.evo_state]
     classifier = fit_state_classifier(
         classifier_table, classifier_flux, classifier_ivar,
         features=args.classifier_features,
-        n_components=args.classifier_components, min_proba=args.min_proba)
-    is_rgb, source, rgb_proba = select_rgb(
-        table, classifier, args.min_proba, normalized_flux, normalized_ivar)
-    if is_rgb.sum() == 0:
-        raise ValueError("no RGB stars survive the selection; check the "
+        n_components=args.classifier_components, min_proba=args.min_proba,
+        target=target)
+    is_target, source, state_proba = select_state(
+        table, classifier, args.min_proba, normalized_flux, normalized_ivar,
+        target=target)
+    if is_target.sum() == 0:
+        raise ValueError("no {0} stars survive the selection; check the "
                          "EvoState column, the classifier training table, or "
-                         "--min-proba")
+                         "--min-proba".format(STATE_LABELS[target]))
 
     # Normalize only the selected stars, identically to training (already
     # done above when the classifier consumed spectra).
     if normalized_flux is None:
         normalized_flux, normalized_ivar = normalize_spectra(
-            dispersion, flux[is_rgb], ivar[is_rgb], args.continuum_list)
+            dispersion, flux[is_target], ivar[is_target], args.continuum_list)
     else:
-        normalized_flux = normalized_flux[is_rgb]
-        normalized_ivar = normalized_ivar[is_rgb]
+        normalized_flux = normalized_flux[is_target]
+        normalized_ivar = normalized_ivar[is_target]
 
     catalogue = apply_model(
-        model, table.loc[is_rgb], normalized_flux, normalized_ivar,
-        source[is_rgb], rgb_proba[is_rgb],
+        model, table.loc[is_target], normalized_flux, normalized_ivar,
+        source[is_target], state_proba[is_target], target=target,
         test_batch_size=args.test_batch_size)
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
@@ -475,8 +498,8 @@ def main():
 
     finite = np.isfinite(catalogue["age_gyr"])
     physical = finite & ~catalogue["flag_unphysical_age"]
-    print("\n=== ages for {0} RGB stars ({1} seismic, {2} classified) ==="
-          .format(len(catalogue),
+    print("\n=== ages for {0} {1} stars ({2} seismic, {3} classified) ==="
+          .format(len(catalogue), STATE_LABELS[target],
                   int((catalogue["evo_state_source"] == "seismic").sum()),
                   int((catalogue["evo_state_source"] == "classified").sum())))
     print("  median age: {0:.2f} Gyr | 16th-84th: {1:.2f}-{2:.2f} Gyr | "

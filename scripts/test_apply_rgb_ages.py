@@ -18,10 +18,10 @@ import pytest
 try:
     from scripts.apply_rgb_ages import (RGB, HEB, clean_flux,
                                         classifier_matrix,
-                                        fit_state_classifier, select_rgb)
+                                        fit_state_classifier, select_state)
 except ImportError:
     from apply_rgb_ages import (RGB, HEB, clean_flux, classifier_matrix,
-                                fit_state_classifier, select_rgb)
+                                fit_state_classifier, select_state)
 
 
 N_PIXELS = 240
@@ -91,7 +91,7 @@ def test_spectral_features_recover_rgb_where_labels_cannot():
 
     clf = fit_state_classifier(table, flux, ivar, features="both")
     assert clf is not None and clf.features_used_ == "both"
-    is_rgb, source, proba = select_rgb(table, clf, 0.9, flux, ivar)
+    is_rgb, source, proba = select_state(table, clf, 0.9, flux, ivar)
 
     # Seismic rows are taken at face value, never classified.
     assert (is_rgb[labeled] == (y[labeled] == RGB)).all()
@@ -105,20 +105,25 @@ def test_spectral_features_recover_rgb_where_labels_cannot():
     purity = (y[accepted] == RGB).mean()
     assert completeness > 0.9
     assert purity > 0.95
+    assert set(source[accepted]) == {"classified"}
 
-    # ...whereas on the same data the label-only classifier has nothing to
-    # work with and can call (almost) nothing at p > 0.9.
+    # ...whereas the label-only classifier is guessing on the same data:
+    # boosted trees are overconfident on uninformative features, so its
+    # failure mode is coin-flip contamination among the accepted stars.
     clf_labels = fit_state_classifier(table, features="labels")
     assert clf_labels.features_used_ == "labels"
-    is_rgb_labels, _, _ = select_rgb(table, clf_labels, 0.9)
-    assert is_rgb_labels[unknown].mean() < 0.2
+    is_rgb_labels, _, _ = select_state(table, clf_labels, 0.9)
+    accepted_labels = unknown & is_rgb_labels
+    purity_labels = ((y[accepted_labels] == RGB).mean()
+                     if accepted_labels.any() else 1.0)
+    assert purity_labels < 0.7
 
 
 def test_spectra_only_mode_works():
     table, flux, ivar, y, labeled = make_dataset(seed=1)
     clf = fit_state_classifier(table, flux, ivar, features="spectra")
     assert clf.features_used_ == "spectra"
-    is_rgb, _, _ = select_rgb(table, clf, 0.9, flux, ivar)
+    is_rgb, _, _ = select_state(table, clf, 0.9, flux, ivar)
     unknown = ~labeled
     assert is_rgb[unknown & (y == RGB)].mean() > 0.9
 
@@ -128,15 +133,33 @@ def test_missing_training_spectra_falls_back_to_labels():
     clf = fit_state_classifier(table, features="both")
     assert clf is not None and clf.features_used_ == "labels"
     # And selection then needs no spectra either.
-    is_rgb, _, _ = select_rgb(table, clf, 0.9)
+    is_rgb, _, _ = select_state(table, clf, 0.9)
     assert is_rgb.dtype == bool
 
 
-def test_select_rgb_requires_spectra_for_spectral_classifier():
+def test_select_state_requires_spectra_for_spectral_classifier():
     table, flux, ivar, _, _ = make_dataset(seed=3)
     clf = fit_state_classifier(table, flux, ivar, features="both")
     with pytest.raises(ValueError):
-        select_rgb(table, clf, 0.9)
+        select_state(table, clf, 0.9)
+
+
+def test_heb_target_selects_the_clump():
+    table, flux, ivar, y, labeled = make_dataset(seed=4)
+    clf = fit_state_classifier(table, flux, ivar, features="both",
+                               target=HEB)
+    is_heb, source, proba = select_state(table, clf, 0.9, flux, ivar,
+                                         target=HEB)
+    unknown = ~labeled
+
+    # Seismic HeB rows are taken at face value; RGB rows are excluded.
+    assert (is_heb[labeled] == (y[labeled] == HEB)).all()
+
+    # The classifier recovers the unknown HeB stars, and what it accepts
+    # is HeB, not RGB.
+    assert is_heb[unknown & (y == HEB)].mean() > 0.9
+    accepted = unknown & is_heb
+    assert (y[accepted] == HEB).mean() > 0.95
 
 
 def test_too_few_labeled_stars_returns_none():

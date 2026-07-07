@@ -1,9 +1,10 @@
 #!/bin/bash
 # ===========================================================================
-#  Apply a saved CannonModel to RGB stars -- single-GPU PBS job (gpursaa).
+#  Apply a saved CannonModel to one evolutionary state (RGB by default,
+#  red clump via EVO_STATE=heb) -- single-GPU PBS job (gpursaa).
 #
 #  Runs scripts/apply_rgb_ages.py: loads an already-trained pickled model,
-#  selects the RGB stars of the sample (seismic EvoState where available,
+#  selects the EVO_STATE stars of the sample (seismic EvoState where available,
 #  gradient-boosting classifier fallback accepted at p > MIN_PROBA), continuum-
 #  normalizes them identically to training, and writes a per-star age
 #  catalogue (age_gyr, age_gyr_err, all Cannon labels + errors, chi_sq).
@@ -41,7 +42,10 @@ MODEL="${MODEL:-${PROJECT_DIR}/scr_mk27/trained_cannon_model_temp.pkl}"
 # Data.
 SPECTRA="${SPECTRA:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet}"
 CONTINUUM_LIST="${CONTINUUM_LIST:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data/continuum.list}"
-# Seismic table for the RGB classifier; empty = train on the input sample.
+# Evolutionary state to select and estimate ages for: rgb | heb. Must match
+# the population the MODEL was trained on.
+EVO_STATE="${EVO_STATE:-rgb}"
+# Seismic table for the state classifier; empty = train on the input sample.
 CLASSIFIER_TRAIN="${CLASSIFIER_TRAIN:-}"
 # Classifier feature space: labels, spectra, or both (labels + PCA of the
 # normalized spectra; the spectral CN/CH features separate RC from RGB).
@@ -78,6 +82,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 args=( --model "${MODEL}"
        --spectra "${SPECTRA}"
        --continuum-list "${CONTINUUM_LIST}"
+       --evo-state "${EVO_STATE}"
        --classifier-features "${CLASSIFIER_FEATURES}"
        --classifier-components "${CLASSIFIER_COMPONENTS}"
        --min-proba "${MIN_PROBA}"
@@ -86,7 +91,7 @@ args=( --model "${MODEL}"
 [ -n "${CLASSIFIER_TRAIN}" ] && args+=( --classifier-train "${CLASSIFIER_TRAIN}" )
 [ -n "${TEST_BATCH_SIZE}" ] && args+=( --test-batch-size "${TEST_BATCH_SIZE}" )
 
-echo "[$(date)] applying ${MODEL} to RGB stars of ${SPECTRA} on $(hostname)"
+echo "[$(date)] applying ${MODEL} to ${EVO_STATE} stars of ${SPECTRA} on $(hostname)"
 
 ${PYTHON_BIN} -m scripts.apply_rgb_ages "${args[@]}"
 rc=$?
