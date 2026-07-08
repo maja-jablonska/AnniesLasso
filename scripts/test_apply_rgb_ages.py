@@ -18,10 +18,12 @@ import pytest
 try:
     from scripts.apply_rgb_ages import (RGB, HEB, clean_flux,
                                         classifier_matrix,
-                                        fit_state_classifier, select_state)
+                                        fit_state_classifier, seismic_state,
+                                        select_state)
 except ImportError:
     from apply_rgb_ages import (RGB, HEB, clean_flux, classifier_matrix,
-                                fit_state_classifier, select_state)
+                                fit_state_classifier, seismic_state,
+                                select_state)
 
 
 N_PIXELS = 240
@@ -57,6 +59,29 @@ def make_dataset(n=1000, seed=0):
     labeled = rng.random_sample(n) < 0.5
     table["EvoState"] = np.where(labeled, y, np.nan)
     return table, flux, ivar, y, labeled
+
+
+def test_seismic_state_reads_string_evolst():
+    # The APOKASC prep notebook writes string 'RGB'/'RC' in EvolSt; anything
+    # ambiguous (or missing) must stay NaN so those stars get classified.
+    table = pd.DataFrame(
+        {"EvolSt": ["RGB", "RC", " rc ", "HeB", "RC/RGB?", None]})
+    state = seismic_state(table)
+    assert state.tolist()[:4] == [RGB, HEB, HEB, HEB]
+    assert state[4:].isna().all()
+
+
+def test_seismic_state_prefers_numeric_evostate():
+    table = pd.DataFrame({"EvoState": [1, 2, np.nan, 7],
+                          "EvolSt": ["RC", "RGB", "RGB", "RGB"]})
+    state = seismic_state(table)
+    assert state.tolist()[:2] == [RGB, HEB]
+    assert state[2:].isna().all()
+
+
+def test_seismic_state_without_state_columns_is_all_nan():
+    table = pd.DataFrame({"raw_teff": [4800.0, 4900.0]})
+    assert seismic_state(table).isna().all()
 
 
 def test_clean_flux_fills_bad_pixels_and_clips():

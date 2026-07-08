@@ -12,10 +12,11 @@ catalogue. The state must match the population the model was trained on --
 the script cannot tell from the pickle, so name your models accordingly
 (e.g. ``cannon_rgb_order2.pkl`` vs ``cannon_rc_order2.pkl``).
 
-State selection uses the seismic evolutionary state where available
-(``EvoState``: 1 = RGB, 2 = HeB) and falls back to a gradient-boosting
-classifier for stars without one, accepting only predictions with the
-target-state probability above ``--min-proba``.
+State selection uses the seismic evolutionary state where available (numeric
+``EvoState``: 1 = RGB, 2 = HeB; or the APOKASC string column ``EvolSt``:
+'RGB' / 'RC') and falls back to a gradient-boosting classifier for stars
+without one, accepting only predictions with the target-state probability
+above ``--min-proba``.
 The classifier features are set by ``--classifier-features``: the label space
 (Teff / log g / [Fe/H] / [C/Fe] / [N/Fe] / [Mg/Fe]), a PCA compression of the
 continuum-normalized spectra (the CN/CH molecular features that make RC and
@@ -76,17 +77,34 @@ logger = logging.getLogger("thecannon.apply_rgb")
 RGB, HEB = 1, 2
 STATE_CODES = {"rgb": RGB, "heb": HEB}
 STATE_LABELS = {RGB: "RGB", HEB: "HeB"}
+# String spellings of the state as found in the APOKASC ``EvolSt`` column
+# (the red clump is core-helium burning). Ambiguous entries are left out on
+# purpose so they classify as unknown rather than train the classifier.
+STATE_STRINGS = {"rgb": RGB, "rc": HEB, "heb": HEB}
 EVO_FEATURES = ["raw_teff", "raw_logg", "raw_fe_h", "c_fe", "n_fe", "mg_fe"]
 CLASSIFIER_FEATURE_MODES = ("labels", "spectra", "both")
 DEFAULT_SPECTRAL_COMPONENTS = 50
+# log10(age/Gyr) label names, by training vintage: the Ho+17-style models
+# use log_age_Dnu; the one-step APOKASC notebooks use logAgeRGB / logAgeRC.
+AGE_LABELS = ("log_age_Dnu", "logAgeRGB", "logAgeRC")
 
 
 def seismic_state(table):
-    """ Numeric ``EvoState`` per row (NaN where absent or not RGB/HeB). """
+    """
+    Numeric evolutionary state per row (NaN where absent or ambiguous):
+    the numeric ``EvoState`` column (1 = RGB, 2 = HeB) where present,
+    otherwise the string ``EvolSt`` column that the APOKASC prep notebook
+    writes ('RGB' / 'RC'). Unrecognized values stay NaN so the star is
+    classified rather than trusted.
+    """
     import pandas as pd
-    if "EvoState" not in table.columns:
+    if "EvoState" in table.columns:
+        state = pd.to_numeric(table["EvoState"], errors="coerce")
+    elif "EvolSt" in table.columns:
+        state = (table["EvolSt"].astype(str).str.strip().str.lower()
+                 .map(STATE_STRINGS))
+    else:
         return pd.Series(np.nan, index=table.index)
-    state = pd.to_numeric(table["EvoState"], errors="coerce")
     return state.where(state.isin([RGB, HEB]))
 
 
@@ -327,12 +345,12 @@ def apply_model(model, table, normalized_flux, normalized_ivar, source,
     import pandas as pd
 
     label_names = list(model.vectorizer.label_names)
-    missing = [n for n in ("log_age_Dnu",) if n not in label_names]
-    if missing:
-        raise ValueError("the model has no {0} label (labels: {1}); cannot "
-                         "estimate ages".format(missing[0],
-                                                ", ".join(label_names)))
-    age_index = label_names.index("log_age_Dnu")
+    age_label = next((n for n in AGE_LABELS if n in label_names), None)
+    if age_label is None:
+        raise ValueError("the model has no age label (looked for {0}; "
+                         "labels: {1}); cannot estimate ages".format(
+                             ", ".join(AGE_LABELS), ", ".join(label_names)))
+    age_index = label_names.index(age_label)
 
     predicted, cov, meta = model.test(
         normalized_flux, normalized_ivar, batch_size=test_batch_size)
@@ -390,7 +408,8 @@ def main():
                              "must match the population the model was "
                              "trained on (default: rgb)")
     parser.add_argument("--classifier-train", default=None,
-                        help="parquet with seismic EvoState rows to train the "
+                        help="parquet with seismically labeled rows (numeric "
+                             "EvoState or APOKASC string EvolSt) to train the "
                              "state classifier on (default: the input sample)")
     parser.add_argument("--classifier-features", default="both",
                         choices=CLASSIFIER_FEATURE_MODES,
