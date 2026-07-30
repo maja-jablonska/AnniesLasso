@@ -1,0 +1,97 @@
+#!/bin/bash
+# ===========================================================================
+#  All-missions RGB (order, regularization) sweep -- single-GPU PBS job.
+#
+#  Batch counterpart of the RUN_SWEEP cell in
+#  notebooks/train_rgb_wilett_all_missions.ipynb: rebuilds that notebook's
+#  training sample (finite Willett age, quality cuts, seismic logg, RGB
+#  selection via seismic EvoState + classifier, mg_fe censor windows) and
+#  scores orders 2/3/4 x a ladder of L1 strengths with the same 5-fold
+#  protocol and seed (888). See scripts/sweep_all_missions.py.
+#
+#  Grid points run sequentially on one GPU (each train/test step is already
+#  vectorized over pixels/stars, so one point saturates the device), cheapest
+#  first: reg=0 rows use the closed-form path and finish in seconds-minutes;
+#  the order-4 L1 rows are by far the slowest (330 terms/pixel, iterative
+#  path) and land last. Every finished row is appended to the CSV
+#  immediately, so a walltime kill keeps all completed rows.
+#
+#  Queue/resource notes (NCI Gadi): gpuvolta charges 12 CPUs per GPU, so
+#  ncpus must be 12 * ngpus; memory up to ~95GB per GPU. The Python
+#  environment must have a CUDA-enabled jaxlib (e.g. `pip install
+#  "jax[cuda12]"`) plus scikit-learn for the RGB classifier.
+#
+#  Submit with:   qsub scripts/sweep_all_missions.pbs
+#  Override the grid without editing the file (note the quoting -- commas
+#  inside a -v value must be protected from PBS's variable splitting):
+#      qsub -v 'ORDERS="2,3",REGS="0,1000"' scripts/sweep_all_missions.pbs
+# ===========================================================================
+#PBS -N cannon-sweep-am
+#PBS -P mk27
+#PBS -q gpuvolta
+#PBS -l ngpus=1
+#PBS -l ncpus=12
+#PBS -l mem=95GB
+#PBS -l walltime=24:00:00
+#PBS -l storage=scratch/mk27+gdata/mk27
+#PBS -l wd
+#PBS -j oe
+
+set -uo pipefail
+
+# ---- user configuration ---------------------------------------------------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to the Python interpreter (conda/venv) that has thecannon
+# with a CUDA jaxlib + scikit-learn installed.
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+DATA_DIR="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data"
+SPECTRA="${SPECTRA:-${DATA_DIR}/merged_with_ages_raw.parquet}"
+CONTINUUM_LIST="${CONTINUUM_LIST:-${DATA_DIR}/continuum.list}"
+
+ORDERS="${ORDERS:-2,3,4}"
+REGS="${REGS:-0,10,100,1000,10000}"
+# "censored" = the notebook's mg_fe windows; "censored,none" doubles the
+# grid to also measure what censoring buys at each (order, reg).
+CENSOR_MODES="${CENSOR_MODES:-censored}"
+OUTPUT="${OUTPUT:-${PROJECT_DIR}/results/sweep_all_missions.csv}"
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+# Persistent XLA compilation cache, shared across jobs. Keep it on /scratch
+# (not $HOME, which has a small quota) so repeated sweeps skip compilation.
+export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
+mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
+
+# Fail the job immediately if there is no CUDA/GPU backend (rather than
+# silently training on CPU for hours).
+unset JAX_PLATFORMS
+${PYTHON_BIN} - <<'EOF' || { echo "[$(date)] ERROR: no CUDA/GPU JAX backend; aborting"; exit 1; }
+import jax, sys
+print("JAX backend:", jax.default_backend(), jax.devices())
+sys.exit(0 if jax.default_backend() == "gpu" else 1)
+EOF
+
+# The default is to grab 75% of GPU memory up front; the training batch
+# sizes are already memory-budgeted, so let allocations grow as needed and
+# leave headroom for the order-4 grid points.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export TF_GPU_ALLOCATOR=cuda_malloc_async
+
+echo "[$(date)] starting all-missions sweep on $(hostname)"
+echo "         orders=${ORDERS} regs=${REGS} censor=${CENSOR_MODES}"
+echo "         output=${OUTPUT}"
+
+${PYTHON_BIN} -m scripts.sweep_all_missions \
+    --spectra "${SPECTRA}" \
+    --continuum-list "${CONTINUUM_LIST}" \
+    --orders "${ORDERS}" \
+    --regularizations "${REGS}" \
+    --censor-modes "${CENSOR_MODES}" \
+    --output "${OUTPUT}" \
+    -v
+sweep_rc=$?
+
+echo "[$(date)] sweep finished with exit code ${sweep_rc}"
+exit ${sweep_rc}
