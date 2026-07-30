@@ -85,8 +85,10 @@ EVO_FEATURES = ["raw_teff", "raw_logg", "raw_fe_h", "c_fe", "n_fe", "mg_fe"]
 CLASSIFIER_FEATURE_MODES = ("labels", "spectra", "both")
 DEFAULT_SPECTRAL_COMPONENTS = 50
 # log10(age/Gyr) label names, by training vintage: the Ho+17-style models
-# use log_age_Dnu; the one-step APOKASC notebooks use logAgeRGB / logAgeRC.
-AGE_LABELS = ("log_age_Dnu", "logAgeRGB", "logAgeRC")
+# use log_age_Dnu; the one-step APOKASC notebooks use logAgeRGB / logAgeRC;
+# the Willett-vintage notebooks (train_rgb_wilett*.ipynb, incl. the
+# all-missions model) use log_age_L.
+AGE_LABELS = ("log_age_L", "log_age_Dnu", "logAgeRGB", "logAgeRC")
 
 
 def seismic_state(table):
@@ -370,6 +372,10 @@ def apply_model(model, table, normalized_flux, normalized_ivar, source,
     else:
         columns["star_index"] = np.asarray(table.index)
         logger.warning("no identifier column found; using row index instead")
+    # sdss_id is the join key of the bulge catalogues; carry it alongside
+    # whatever find_id_column picked so downstream tables need no crosswalk.
+    if "sdss_id" in table.columns and id_column != "sdss_id":
+        columns["sdss_id"] = np.asarray(table["sdss_id"])
 
     columns["target_state"] = np.full(len(table), STATE_LABELS[target])
     columns["evo_state_source"] = source
