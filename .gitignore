@@ -17,3 +17,7 @@ dist/
 # Cannon sweep / W&B artifacts
 wandb/
 sweep_*results.csv
+
+# OS / tool caches
+.DS_Store
+.understand-anything/

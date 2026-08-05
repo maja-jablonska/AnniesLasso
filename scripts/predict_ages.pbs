@@ -1,0 +1,105 @@
+#!/bin/bash
+# ===========================================================================
+#  Predict ages for a PRE-SELECTED sample (pure RGB by default, red clump
+#  via STATE=rc) with a saved CannonModel -- single-GPU PBS job (gpursaa).
+#
+#  Runs scripts/predict_ages.py, the script version of
+#  notebooks/predict_ages.ipynb: no evolutionary-state selection at all --
+#  the SPECTRA table must already be pure STATE stars and the MODEL must be
+#  trained on that population. The spectra are continuum-normalized
+#  identically to training and the test step writes a per-star age
+#  catalogue (age_gyr, age_gyr_err, all Cannon labels + errors, chi_sq).
+#
+#  Inference only -- no training -- so this is a short job; the GPU is used by
+#  the vmapped test step. Pure compute, no internet or W&B needed.
+#
+#  Submit with:   qsub scripts/predict_ages.pbs
+#  or override:   qsub -v STATE=rc,\
+#                     SPECTRA=/path/to/bulge_rc_spectra.parquet,\
+#                     OUTPUT=/path/to/cannon_ages_rc.parquet \
+#                     scripts/predict_ages.pbs
+# ===========================================================================
+#PBS -N cannon-predict-ages
+#PBS -P dg97
+#PBS -q gpursaa
+#PBS -l ngpus=1
+#PBS -l ncpus=14
+#PBS -l mem=95GB
+#PBS -l walltime=02:00:00
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27
+#PBS -l wd
+#PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
+
+set -uo pipefail
+
+# ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+# Absolute path to a Python with thecannon + a CUDA jaxlib installed.
+PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
+# Evolutionary state of the sample AND the model: rgb | rc.
+STATE="${STATE:-rgb}"
+# The trained pickled CannonModel to apply (must match STATE).
+MODEL="${MODEL:-/home/100/mj8805/scr_mk27/trained_cannon_model_${STATE}.pkl}"
+# Data: a parquet that is already pure STATE stars.
+DATA_DIR="/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data"
+SPECTRA="${SPECTRA:-${DATA_DIR}/bulge_${STATE}_spectra.parquet}"
+CONTINUUM_LIST="${CONTINUUM_LIST:-${DATA_DIR}/continuum.list}"
+OUTPUT="${OUTPUT:-${DATA_DIR}/cannon_ages_${STATE}.parquet}"
+TEST_BATCH_SIZE="${TEST_BATCH_SIZE:-32}"     # empty = memory-aware auto
+# Stars per test-step call. model.test uploads the whole array it is handed, so
+# its device memory scales with the star count, not TEST_BATCH_SIZE; 46k bulge
+# spectra at float64 OOM a 32GB GPU in one call. 0 = no chunking.
+CHUNK_SIZE="${CHUNK_SIZE:-4000}"
+QUALITY_CUT="${QUALITY_CUT:-}"               # non-empty = apply quality cuts
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+if [ ! -f "${MODEL}" ]; then
+    echo "[$(date)] ERROR: no model at ${MODEL}; pass MODEL=/path/to/model.pkl"
+    exit 1
+fi
+if [ ! -f "${SPECTRA}" ]; then
+    echo "[$(date)] ERROR: no spectra at ${SPECTRA}; pass SPECTRA=/path/to/sample.parquet"
+    exit 1
+fi
+
+# Persistent XLA compilation cache on /scratch, shared across jobs, so repeated
+# runs skip recompiling the same-shape test programs.
+export JAX_COMPILATION_CACHE_DIR="${PROJECT_DIR}/.jax-cache"
+mkdir -p "${JAX_COMPILATION_CACHE_DIR}"
+
+# Fail the job immediately if there is no CUDA/GPU backend (don't crawl on CPU).
+unset JAX_PLATFORMS
+${PYTHON_BIN} - <<'EOF' || { echo "[$(date)] ERROR: no CUDA/GPU JAX backend; aborting"; exit 1; }
+import jax, sys
+print("JAX backend:", jax.default_backend(), jax.devices())
+sys.exit(0 if jax.default_backend() == "gpu" else 1)
+EOF
+
+# Let GPU allocations grow instead of grabbing 75% up front.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+args=( --model "${MODEL}"
+       --spectra "${SPECTRA}"
+       --state "${STATE}"
+       --continuum-list "${CONTINUUM_LIST}"
+       --output "${OUTPUT}"
+       --chunk-size "${CHUNK_SIZE}"
+       -v )
+[ -n "${TEST_BATCH_SIZE}" ] && args+=( --test-batch-size "${TEST_BATCH_SIZE}" )
+[ -n "${QUALITY_CUT}" ] && args+=( --quality-cut )
+
+echo "[$(date)] predicting ${STATE} ages: ${MODEL} on ${SPECTRA} ($(hostname))"
+
+${PYTHON_BIN} -m scripts.predict_ages "${args[@]}"
+rc=$?
+
+if [ ${rc} -eq 0 ]; then
+    echo "[$(date)] age inference finished; wrote ${OUTPUT}"
+else
+    echo "[$(date)] age inference FAILED with exit code ${rc}; no catalogue written"
+fi
+exit ${rc}
