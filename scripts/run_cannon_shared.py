@@ -71,6 +71,12 @@ def main():
     ap.add_argument("--include-val", action="store_true",
                     help="fold the val stars into the training set")
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--good-pixel-frac", type=float, default=0.99,
+                    help="only used if the dataset has no pixel_mask.npy yet")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="recorded for provenance; the Cannon's training is "
+                         "deterministic given the data, so this changes "
+                         "nothing (kept so every runner takes --seed)")
     ap.add_argument("--out", default=None,
                     help="output parquet (default: <dataset-dir>/"
                          "cannon_shared_predictions.parquet)")
@@ -87,6 +93,13 @@ def main():
     split = stars["split"].to_numpy()
     fold = stars["fold"].to_numpy()
     train_mask = (split == "train") | (args.include_val & (split == "val"))
+
+    # the SAME wavelength columns Lux uses — otherwise the two spectral
+    # methods see different data for the same star
+    keep = stardata.shared_pixel_mask(args.dataset_dir, ivar, train_mask,
+                                      args.good_pixel_frac)
+    print(f"pixel mask: keeping {keep.sum()}/{keep.size} columns")
+    dispersion, flux, ivar = dispersion[keep], flux[:, keep], ivar[:, keep]
 
     pred = np.full((len(stars), len(args.labels)), np.nan)
     perr = np.full_like(pred, np.nan)
@@ -116,7 +129,7 @@ def main():
             predicted |= pm
 
     out_cols = {"APOGEE_ID": stars["APOGEE_ID"], "split": stars["split"]}
-    for c in ("source", "evo_state_source", "rgb_proba", "snr"):
+    for c in ("source", "is_primary", "evo_state_source", "rgb_proba", "snr"):
         if c in stars.columns:
             out_cols[c] = stars[c]
     for j, name in enumerate(args.labels):
