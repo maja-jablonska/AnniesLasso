@@ -129,7 +129,8 @@ def main():
             predicted |= pm
 
     out_cols = {"APOGEE_ID": stars["APOGEE_ID"], "split": stars["split"]}
-    for c in ("source", "is_primary", "evo_state_source", "rgb_proba", "snr"):
+    for c in ("row_id", "source", "is_primary", "is_dup_spectrum",
+              "evo_state_source", "rgb_proba", "snr"):
         if c in stars.columns:
             out_cols[c] = stars[c]
     for j, name in enumerate(args.labels):
