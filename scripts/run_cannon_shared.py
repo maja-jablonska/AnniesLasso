@@ -106,14 +106,20 @@ def main():
     rchi2 = np.full(len(stars), np.nan)
     predicted = np.zeros(len(stars), bool)
 
+    # Predict the val stars too. They are held out of training (unless
+    # --include-val), so their predictions are genuinely out of sample and
+    # are what stardiag.calibrate_errors fits the error model on -- fitting
+    # it on test would contaminate every metric reported from test.
     test_mask = split == "test"
-    print(f"holdout: training on {train_mask.sum()} rows, "
-          f"predicting {test_mask.sum()} test rows")
+    hold_mask = test_mask | ((split == "val") & ~train_mask)
+    print(f"holdout: training on {train_mask.sum()} rows, predicting "
+          f"{hold_mask.sum()} held-out rows ({test_mask.sum()} test, "
+          f"{int((hold_mask & ~test_mask).sum())} val)")
     p, e, c = fit_and_predict(labels_df, flux, ivar, dispersion, train_mask,
-                              test_mask, args.labels, args.order,
+                              hold_mask, args.labels, args.order,
                               args.regularization, args.batch_size)
-    pred[test_mask], perr[test_mask], rchi2[test_mask] = p, e, c
-    predicted |= test_mask
+    pred[hold_mask], perr[hold_mask], rchi2[hold_mask] = p, e, c
+    predicted |= hold_mask
 
     if args.mode == "oof":
         for k in sorted(set(fold[fold >= 0])):
