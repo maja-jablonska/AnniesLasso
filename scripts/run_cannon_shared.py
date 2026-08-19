@@ -71,6 +71,12 @@ def main():
     ap.add_argument("--include-val", action="store_true",
                     help="fold the val stars into the training set")
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--good-pixel-frac", type=float, default=0.99,
+                    help="only used if the dataset has no pixel_mask.npy yet")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="recorded for provenance; the Cannon's training is "
+                         "deterministic given the data, so this changes "
+                         "nothing (kept so every runner takes --seed)")
     ap.add_argument("--out", default=None,
                     help="output parquet (default: <dataset-dir>/"
                          "cannon_shared_predictions.parquet)")
@@ -88,19 +94,32 @@ def main():
     fold = stars["fold"].to_numpy()
     train_mask = (split == "train") | (args.include_val & (split == "val"))
 
+    # the SAME wavelength columns Lux uses — otherwise the two spectral
+    # methods see different data for the same star
+    keep = stardata.shared_pixel_mask(args.dataset_dir, ivar, train_mask,
+                                      args.good_pixel_frac)
+    print(f"pixel mask: keeping {keep.sum()}/{keep.size} columns")
+    dispersion, flux, ivar = dispersion[keep], flux[:, keep], ivar[:, keep]
+
     pred = np.full((len(stars), len(args.labels)), np.nan)
     perr = np.full_like(pred, np.nan)
     rchi2 = np.full(len(stars), np.nan)
     predicted = np.zeros(len(stars), bool)
 
+    # Predict the val stars too. They are held out of training (unless
+    # --include-val), so their predictions are genuinely out of sample and
+    # are what stardiag.calibrate_errors fits the error model on -- fitting
+    # it on test would contaminate every metric reported from test.
     test_mask = split == "test"
-    print(f"holdout: training on {train_mask.sum()} rows, "
-          f"predicting {test_mask.sum()} test rows")
+    hold_mask = test_mask | ((split == "val") & ~train_mask)
+    print(f"holdout: training on {train_mask.sum()} rows, predicting "
+          f"{hold_mask.sum()} held-out rows ({test_mask.sum()} test, "
+          f"{int((hold_mask & ~test_mask).sum())} val)")
     p, e, c = fit_and_predict(labels_df, flux, ivar, dispersion, train_mask,
-                              test_mask, args.labels, args.order,
+                              hold_mask, args.labels, args.order,
                               args.regularization, args.batch_size)
-    pred[test_mask], perr[test_mask], rchi2[test_mask] = p, e, c
-    predicted |= test_mask
+    pred[hold_mask], perr[hold_mask], rchi2[hold_mask] = p, e, c
+    predicted |= hold_mask
 
     if args.mode == "oof":
         for k in sorted(set(fold[fold >= 0])):
@@ -116,7 +135,8 @@ def main():
             predicted |= pm
 
     out_cols = {"APOGEE_ID": stars["APOGEE_ID"], "split": stars["split"]}
-    for c in ("source", "evo_state_source", "rgb_proba", "snr"):
+    for c in ("row_id", "source", "is_primary", "is_dup_spectrum",
+              "evo_state_source", "rgb_proba", "snr"):
         if c in stars.columns:
             out_cols[c] = stars[c]
     for j, name in enumerate(args.labels):
