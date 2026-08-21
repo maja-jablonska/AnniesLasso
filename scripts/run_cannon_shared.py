@@ -68,6 +68,12 @@ def main():
     ap.add_argument("--order", type=int, default=3)
     ap.add_argument("--regularization", type=float, default=100.0)
     ap.add_argument("--mode", choices=["holdout", "oof"], default="holdout")
+    ap.add_argument("--apply-to", default=None,
+                    help="parquet of spectra OUTSIDE the labelled sample to "
+                         "apply the trained model to (e.g. the bulge RGB "
+                         "sample). Stars beyond the training parameter range "
+                         "are extrapolation and are flagged.")
+    ap.add_argument("--apply-out", default=None)
     ap.add_argument("--include-val", action="store_true",
                     help="fold the val stars into the training set")
     ap.add_argument("--batch-size", type=int, default=32)
@@ -96,6 +102,7 @@ def main():
 
     # the SAME wavelength columns Lux uses — otherwise the two spectral
     # methods see different data for the same star
+    full_dispersion = dispersion.copy()
     keep = stardata.shared_pixel_mask(args.dataset_dir, ivar, train_mask,
                                       args.good_pixel_frac)
     print(f"pixel mask: keeping {keep.sum()}/{keep.size} columns")
@@ -150,6 +157,50 @@ def main():
         Path(args.dataset_dir) / "cannon_shared_predictions.parquet"
     out.to_parquet(out_path)
     print(f"wrote {len(out)} predictions to {out_path}")
+
+    if args.apply_to:
+        print(f"\napplying the trained model to {args.apply_to}")
+        import thecannon as tc
+        ids, xf, xi = stardata.load_external_spectra(
+            args.apply_to, full_dispersion, continuum_list=args.continuum_list,
+            data_root=args.data_root)
+        xf, xi = xf[:, keep], xi[:, keep]
+        print(f"  {len(ids)} stars, {xf.shape[1]} pixels")
+        # refit on the same training rows, then run the test step over the
+        # external sample in chunks so device memory stays bounded
+        model = tc.CannonModel(
+            labels_df.loc[train_mask, args.labels], flux[train_mask],
+            ivar[train_mask],
+            tc.vectorizer.PolynomialVectorizer(args.labels, args.order),
+            dispersion=dispersion, regularization=args.regularization)
+        model.train(progressbar=False)
+        P = np.full((len(ids), len(args.labels)), np.nan)
+        E = np.full_like(P, np.nan); X = np.full(len(ids), np.nan)
+        step = 4000
+        for a in range(0, len(ids), step):
+            b = min(a + step, len(ids))
+            op, cov, meta = model.test(xf[a:b], xi[a:b],
+                                       batch_size=args.batch_size,
+                                       progressbar=False)
+            P[a:b] = np.asarray(op)
+            E[a:b] = np.sqrt(np.diagonal(cov, axis1=1, axis2=2)) * model._scales
+            X[a:b] = np.array([m["r_chi_sq"] for m in meta])
+            print(f"  {b}/{len(ids)}", flush=True)
+        ao = pd.DataFrame({"star_id": ids})
+        for j, name in enumerate(args.labels):
+            ao[f"pred_{name}"] = P[:, j]
+            ao[f"pred_err_{name}"] = E[:, j]
+        ao["val_chi2"] = X
+        ao["in_training_range"] = stardata.coverage_flag(
+            ao.rename(columns={f"pred_{l}": l for l in args.labels}),
+            stars[stars["split"] == "train"], labels=["raw_teff", "raw_fe_h"])
+        apath = Path(args.apply_out or
+                     Path(args.dataset_dir) / "cannon_applied.parquet")
+        ao.to_parquet(apath)
+        n_out = int((~ao.in_training_range).sum())
+        print(f"  wrote {len(ao)} predictions to {apath}")
+        print(f"  {n_out} ({100*n_out/len(ao):.1f}%) outside the training "
+              f"parameter range, flagged in_training_range=False")
 
 
 if __name__ == "__main__":
