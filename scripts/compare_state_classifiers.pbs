@@ -12,7 +12,9 @@
 #
 #  This is what justifies (or refutes) running a different classifier on the
 #  bulge than on the calibration sample. No GPU: sklearn plus one continuum
-#  normalization pass, which the NPZ cache makes a one-off.
+#  normalization pass, which the NPZ cache makes a one-off. Sized and queued
+#  like the repo's other CPU jobs (mk27 on rsaa, 16 cpus / 64 GB) -- dg97
+#  pairs with the gpursaa queues here, not with the CPU ones.
 #
 #  Follows the benchmark's conventions so the numbers are comparable with the
 #  Cannon/Lux/BNN runs: cuts and derivations come from stardata, folds are
@@ -37,10 +39,10 @@
 #         scripts/compare_state_classifiers.pbs
 # ===========================================================================
 #PBS -N cannon-state-ablation
-#PBS -P dg97
-#PBS -q normal
-#PBS -l ncpus=12
-#PBS -l mem=96GB
+#PBS -P mk27
+#PBS -q rsaa
+#PBS -l ncpus=16
+#PBS -l mem=64GB
 #PBS -l walltime=03:00:00
 #PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
 #PBS -l wd
