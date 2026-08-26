@@ -135,6 +135,50 @@ DEFAULT_SPLIT_SEED, DEFAULT_FOLDS = 42, 5
 
 PROFILE_COLS = ["c_n", "log_age_L", "raw_fe_h", "raw_teff"]
 
+# The bulge is more metal-rich and lower-S/N than the calibration field, so a
+# classifier's global numbers are optimistic for it. These subsets score the
+# SAME out-of-fold probabilities on the calibration stars that most resemble
+# the bulge: if a feature space holds up in the hardest calibration regime it
+# will likely hold in the bulge, and if it collapses there the transfer was
+# never safe. Quartiles, so the counts stay honest and visible.
+STRESS_SUBSETS = (
+    ("all", None, None),
+    ("metal_rich", "raw_fe_h", "high"),
+    ("low_snr", "snr", "low"),
+    ("bulge_like", None, "both"),        # metal-rich AND low-S/N
+)
+
+
+def stress_masks(table, min_n=100):
+    """ ``{name: boolean mask}`` over the labelled rows (subsets with fewer
+    than ``min_n`` stars, or whose column is missing, are dropped). """
+    out, parts = {}, {}
+    for name, col, side in STRESS_SUBSETS:
+        if name == "all":
+            out["all"] = np.ones(len(table), bool)
+            continue
+        if side == "both":
+            continue
+        if col not in table.columns:
+            logger.warning("no '%s' column; skipping the %s subset", col, name)
+            continue
+        v = pd.to_numeric(table[col], errors="coerce").to_numpy(float)
+        if not np.isfinite(v).any():
+            logger.warning("'%s' is all non-finite; skipping the %s subset",
+                           col, name)
+            continue
+        q = np.nanquantile(v, 0.75 if side == "high" else 0.25)
+        m = (v >= q) if side == "high" else (v <= q)
+        m &= np.isfinite(v)
+        out[name] = parts[name] = m
+    if len(parts) == 2:
+        out["bulge_like"] = np.logical_and(*parts.values())
+    kept = {k: v for k, v in out.items() if k == "all" or v.sum() >= min_n}
+    for k in set(out) - set(kept):
+        logger.warning("stress subset %s has only %d stars (< %d); dropped",
+                       k, int(out[k].sum()), min_n)
+    return kept
+
 
 # --------------------------------------------------------------------- data
 
@@ -334,9 +378,14 @@ def out_of_fold(config, table, nf, ni, labeled, n_splits, seed, n_components):
 
 # ------------------------------------------------------------------ metrics
 
-def threshold_metrics(p_rgb, y, table_labeled, thresholds):
-    """ Purity/completeness of the accepted RGB set against seismic truth. """
+def threshold_metrics(p_rgb, y, table_labeled, thresholds, subset=None):
+    """ Purity/completeness of the accepted RGB set against seismic truth,
+    optionally restricted to a stress subset (the probabilities are still the
+    out-of-fold ones from the full fit -- only the scoring is restricted). """
     from sklearn.metrics import roc_auc_score
+    if subset is not None:
+        p_rgb, y = p_rgb[subset], y[subset]
+        table_labeled = table_labeled.loc[subset].reset_index(drop=True)
     is_rgb = (y == RGB)
     logg = table_labeled["raw_logg"].to_numpy(float)
     teff = table_labeled["raw_teff"].to_numpy(float)
@@ -345,11 +394,13 @@ def threshold_metrics(p_rgb, y, table_labeled, thresholds):
     for t in thresholds:
         acc = p_rgb > t
         rows.append(dict(
-            threshold=float(t), n_accepted=int(acc.sum()),
+            threshold=float(t), n_scored=int(len(y)),
+            n_accepted=int(acc.sum()),
             purity=float(is_rgb[acc].mean()) if acc.any() else np.nan,
             completeness=float(acc[is_rgb].mean()),
             accuracy=float(((p_rgb > 0.5) == is_rgb).mean()),
-            roc_auc=float(roc_auc_score(is_rgb, p_rgb)),
+            roc_auc=(float(roc_auc_score(is_rgb, p_rgb))
+                     if 0 < is_rgb.sum() < len(is_rgb) else np.nan),
             clumpbox_accuracy=(float(((p_rgb > 0.5) == is_rgb)[box].mean())
                                if box.any() else np.nan),
             n_clumpbox=int(box.sum())))
@@ -515,6 +566,9 @@ def main(argv=None):
                         help="keep rows repeating an (APOGEE_ID, source) pair; "
                              "they carry the SAME spectrum, so by default they "
                              "are dropped as stardata flags them")
+    parser.add_argument("--min-stress-n", type=int, default=100,
+                        help="drop a bulge-like stress subset with fewer than "
+                             "this many labelled stars (default 100)")
     parser.add_argument("--primary-only", action="store_true",
                         help="one deterministic best-SNR row per star "
                              "(stardata.primary_index), as the BNN uses")
@@ -544,6 +598,10 @@ def main(argv=None):
         raise SystemExit("too few seismically labeled stars to ablate")
     tab_lab = table.loc[labeled].reset_index(drop=True)
 
+    masks = stress_masks(tab_lab, args.min_stress_n)
+    logger.info("stress subsets: %s",
+                ", ".join("%s=%d" % (k, v.sum()) for k, v in masks.items()))
+
     cv_rows, profile_rows, bias, selections, oof = [], [], {}, {}, {}
     truth = None
     for config in CONFIGS:
@@ -553,21 +611,24 @@ def main(argv=None):
         truth = y
         oof[name] = p_oof
         thr = PROD_MIN_PROBA if name == "full" else BULGE_MIN_PROBA
-        for row in threshold_metrics(p_oof, y, tab_lab, THRESHOLD_GRID):
-            row.update(config=name,
-                       is_operating_point=bool(row["threshold"] == thr))
-            cv_rows.append(row)
+        for subset, mask in masks.items():
+            for row in threshold_metrics(p_oof, y, tab_lab, THRESHOLD_GRID,
+                                         None if subset == "all" else mask):
+                row.update(config=name, subset=subset,
+                           is_operating_point=bool(row["threshold"] == thr))
+                cv_rows.append(row)
         selections[name] = p_all > thr
 
     cv = pd.DataFrame(cv_rows)[
-        ["config", "threshold", "is_operating_point", "n_accepted", "purity",
-         "completeness", "accuracy", "roc_auc", "clumpbox_accuracy",
-         "n_clumpbox"]]
+        ["config", "subset", "threshold", "is_operating_point", "n_scored",
+         "n_accepted", "purity", "completeness", "accuracy", "roc_auc",
+         "clumpbox_accuracy", "n_clumpbox"]]
     cv.to_csv(os.path.join(args.outdir, "cv_metrics.csv"), index=False)
 
     # Matched purity: what the bulge feature space costs once contamination is
     # held fixed at the production classifier's level.
-    full_op = cv[(cv.config == "full") & (cv.threshold == PROD_MIN_PROBA)]
+    full_op = cv[(cv.config == "full") & (cv.subset == "all")
+                 & (cv.threshold == PROD_MIN_PROBA)]
     target = args.target_purity or float(full_op["purity"].iloc[0])
     matched = {}
     for name, p_oof in oof.items():
@@ -638,7 +699,14 @@ def main(argv=None):
           % (labeled.sum(), tab_lab["APOGEE_ID"].nunique(),
              (truth == RGB).sum(), (truth == HEB).sum(), args.folds,
              args.seed))
-    print(cv[cv.is_operating_point].to_string(index=False))
+    print(cv[cv.is_operating_point & (cv.subset == "all")]
+          .drop(columns=["subset"]).to_string(index=False))
+    stress = cv[cv.is_operating_point & (cv.subset != "all")]
+    if len(stress):
+        print("\n=== the same probabilities scored on bulge-like calibration "
+              "stars ===")
+        print(stress[["config", "subset", "n_scored", "n_accepted", "purity",
+                      "completeness", "roc_auc"]].to_string(index=False))
     print("\n=== matched purity (target %.3f = 'full' at its operating "
           "point) ===" % target)
     for name, m in matched.items():

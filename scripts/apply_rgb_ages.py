@@ -186,8 +186,32 @@ def _report_cv(estimator, X, y, labeled_table, min_proba, features,
         logger.warning("too few stars in the rarest class (%d) to "
                        "cross-validate the classifier", int(counts.min()))
         return
+
+    # Fold on the STAR, not the row: a star observed by two missions has
+    # several rows here, and a row-level split puts one of its spectra in
+    # training and another in the fold scoring it -- which quotes a purity
+    # no target sample can reproduce, since none of its stars were ever
+    # seen in training. Diagnostics only; the selection is unaffected.
+    groups = None
+    for c in ("APOGEE_ID", "apogee_id", "sdss_id"):
+        if c in labeled_table.columns:
+            groups = labeled_table[c].to_numpy()
+            break
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-    proba = cross_val_predict(estimator, X, y, cv=cv, method="predict_proba")
+    if groups is not None and len(np.unique(groups)) < len(groups):
+        try:
+            from sklearn.model_selection import StratifiedGroupKFold
+            cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                      random_state=0)
+        except ImportError:
+            from sklearn.model_selection import GroupKFold
+            cv = GroupKFold(n_splits=n_splits)
+            logger.warning("sklearn has no StratifiedGroupKFold; the "
+                           "classifier CV folds are grouped but unstratified")
+    else:
+        groups = None
+    proba = cross_val_predict(estimator, X, y, cv=cv, groups=groups,
+                              method="predict_proba")
     p_target = proba[:, list(classes).index(target)]
     predicted = classes[proba.argmax(axis=1)]
     correct = predicted == y
