@@ -1,0 +1,6 @@
+# Job scripts must reach Gadi with LF endings whatever the checkout platform:
+# a CRLF #!/bin/bash makes the interpreter "/bin/bash\r", PBS drops every
+# #PBS directive as invalid, and the job dies 127 with the staged .SC
+# reported as "No such file or directory".
+*.pbs text eol=lf
+*.sh  text eol=lf
