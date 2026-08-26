@@ -21,7 +21,14 @@ every one of them out-of-fold against seismic truth:
     bulge+seis labels, seismic log g         <- isolates the log g term
     full       labels (seismic log g) + PCA  <- the production training-side one
 
-and answers the two questions a referee will ask:
+It follows the benchmark's conventions so its numbers sit next to the
+Cannon/Lux/BNN ones: the cuts and derivations come from ``stardata`` itself,
+the folds are STAR-level (a star observed by two missions never straddles a
+fold, as ``stardata`` insists) and seeded with the benchmark's split seed 42,
+and rows repeating an (APOGEE_ID, source) pair -- the same spectrum handed
+out twice -- are dropped rather than allowed to vote twice.
+
+It answers the two questions a referee will ask:
 
 1. **What does the bulge feature space actually cost?**  Purity and
    completeness against seismic truth at a grid of acceptance thresholds,
@@ -53,8 +60,8 @@ Usage
         --outdir results/state_classifier_ablation -v
 
 The continuum normalization is the expensive step; ``--cache <file.npz>``
-stores it and later runs reuse it (the cache records the row keys and is
-rejected if the sample changed).
+stores it and later runs reuse it (the cache records which rows it was built
+from and is rejected if the selection changed).
 """
 
 from __future__ import (division, print_function, absolute_import,
@@ -64,9 +71,24 @@ import argparse
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+sys.path.insert(0, str(REPO))
+
+for _c in (REPO.parent / "stardiag", Path.home() / "code" / "stardiag",
+           Path.home() / "scr_mk27" / "stardiag"):
+    if (_c / "stardata.py").exists():
+        sys.path.insert(0, str(_c))
+        break
+else:
+    sys.exit("stardiag checkout (stardata.py) not found next to this repo")
+import stardata  # noqa: E402
 
 try:
     from scripts.train_cannon import load_spectra, normalize_spectra
@@ -95,10 +117,13 @@ BULGE_HGB = dict(max_leaf_nodes=15, l2_regularization=1.0, learning_rate=0.06,
 PROD_MIN_PROBA, BULGE_MIN_PROBA = 0.9, 0.7
 THRESHOLD_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
 
-SENTINEL_COLS = ["raw_teff", "raw_logg", "raw_fe_h", "raw_mg_h", "raw_c_h",
-                 "raw_n_h", "raw_al_h"]
-# Same scaling-relation constants as stardata.py and the training notebook.
-LOGG_SUN, NUMAX_SUN, TEFF_SUN = 4.438, 3090.0, 5777.0
+# The cuts, the [X/Fe] and seismic-log g derivations and the deterministic
+# best-SNR row pick all come from stardata, so this ablation and the
+# benchmark can never drift apart on a formula or a sentinel threshold.
+SENTINEL_COLS = stardata.SENTINEL_COLS
+# The benchmark's split seed (stardata.build_dataset / run_benchmark
+# --split-seed) and fold count, so the folds here are drawn the same way.
+DEFAULT_SPLIT_SEED, DEFAULT_FOLDS = 42, 5
 
 PROFILE_COLS = ["c_n", "log_age_L", "raw_fe_h", "raw_teff"]
 
@@ -106,23 +131,10 @@ PROFILE_COLS = ["c_n", "log_age_L", "raw_fe_h", "raw_teff"]
 # --------------------------------------------------------------------- data
 
 def derive_columns(table):
-    """ [X/Fe], [C/N], seismic log g and log(age) -- the training notebook's
-    cells 6, 10 and 12, so this script and the notebook select on identical
-    numbers. """
-    for x in ("mg", "al", "c", "n", "o", "ce", "nd"):
-        src, dst = "raw_{0}_h".format(x), "{0}_fe".format(x)
-        if dst not in table.columns and src in table.columns:
-            table[dst] = table[src] - table["raw_fe_h"]
-    if "c_n" not in table.columns:
-        table["c_n"] = table["raw_c_h"] - table["raw_n_h"]
-    if "log_age_L" not in table.columns:
-        table["log_age_L"] = np.log10(table["age_L"])
-    numax = pd.to_numeric(table["numax"], errors="coerce").to_numpy(float)
-    teff = pd.to_numeric(table["raw_teff"], errors="coerce").to_numpy(float)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        table["logg_seismic"] = (LOGG_SUN + np.log10(numax / NUMAX_SUN)
-                                 + 0.5 * np.log10(teff / TEFF_SUN))
-    return table
+    """ [X/Fe], [C/N], seismic log g and log(age) -- delegated to
+    ``stardata.derive_columns``, the same code the benchmark dataset is built
+    with, so the ablation selects on identical numbers. """
+    return stardata.derive_columns(table)
 
 
 def apply_training_cuts(table):
@@ -148,40 +160,66 @@ def apply_training_cuts(table):
     return table, counts
 
 
-def _cache_key(table):
-    src = (table["source"].astype(str) if "source" in table.columns
-           else pd.Series([""] * len(table)))
-    return (table["APOGEE_ID"].astype(str) + "|" + src).to_numpy(str)
+def restrict_rows(table, counts, drop_duplicate_spectra, primary_only):
+    """
+    Apply the benchmark's row conventions and return the surviving positions.
+
+    ``stardata`` flags rows that repeat an (APOGEE_ID, source) pair: they are
+    NOT independent observations, because ``load_spectra`` dedupes on that
+    pair and hands every one of them the SAME spectrum. Left in, a star with
+    three such rows votes three times in cross-validation and its spectrum
+    appears in both a training fold and the fold scoring it.
+
+    ``--primary-only`` goes further and keeps each star's deterministic
+    best-SNR row (``stardata.primary_index``) -- the benchmark's "one
+    deterministic row per star everywhere".
+    """
+    pos = np.arange(len(table))
+    if drop_duplicate_spectra and "source" in table.columns:
+        dup = table.duplicated(["APOGEE_ID", "source"], keep="first").to_numpy()
+        counts["duplicate_spectrum_rows"] = int(dup.sum())
+        table, pos = table[~dup].reset_index(drop=True), pos[~dup]
+    if primary_only:
+        keep = table.index.isin(stardata.primary_index(table))
+        counts["non_primary_rows"] = int((~keep).sum())
+        table, pos = table[keep].reset_index(drop=True), pos[keep]
+    counts["rows_used"] = int(len(table))
+    counts["stars_used"] = int(table["APOGEE_ID"].nunique())
+    logger.info("rows: %d used, %d stars (dropped %d duplicate-spectrum, "
+                "%d non-primary)", counts["rows_used"], counts["stars_used"],
+                counts.get("duplicate_spectrum_rows", 0),
+                counts.get("non_primary_rows", 0))
+    return table, pos, counts
 
 
 def load_normalized(args):
-    """ ``(table, normalized_flux, normalized_ivar)`` for the post-cut sample,
-    reusing ``--cache`` when it matches the current row keys. """
+    """ ``(table, normalized_flux, normalized_ivar, counts)`` for the post-cut
+    sample, reusing ``--cache`` when it was built for the same rows. """
     table, dispersion, flux, ivar = load_spectra(args.spectra)
+    # Positions carried explicitly: (APOGEE_ID, source) is NOT unique in the
+    # merged catalogue, so the surviving rows cannot be recovered by key.
+    table = table.reset_index(drop=True)
+    table["_row_pos"] = np.arange(len(table))
+
     table, counts = apply_training_cuts(table)
-    # apply_training_cuts reset the index, so re-derive which rows of the
-    # flux array survived by matching keys rather than trusting positions.
-    full_keys = _cache_key(pd.read_parquet(args.spectra,
-                                           columns=["APOGEE_ID", "source"]))
-    keys = _cache_key(table)
-    pos = pd.Index(full_keys).get_indexer(keys)
-    if (pos < 0).any():
-        raise RuntimeError("cut sample carries keys absent from the parquet")
+    table, _, counts = restrict_rows(table, counts, args.drop_duplicate_spectra,
+                                     args.primary_only)
+    pos = table.pop("_row_pos").to_numpy()
     flux, ivar = flux[pos], ivar[pos]
 
     if args.cache and os.path.exists(args.cache):
         cached = np.load(args.cache, allow_pickle=False)
-        if np.array_equal(cached["keys"].astype(str), keys):
+        if (cached["pos"].shape == pos.shape and np.array_equal(cached["pos"],
+                                                                pos)):
             logger.info("reusing normalized spectra from %s", args.cache)
             return table, cached["flux"], cached["ivar"], counts
-        logger.warning("%s was built for a different sample; renormalizing",
+        logger.warning("%s was built for a different row set; renormalizing",
                        args.cache)
 
     nf, ni = normalize_spectra(dispersion, flux, ivar, args.continuum_list)
     nf, ni = np.asarray(nf), np.asarray(ni)
     if args.cache:
-        np.savez_compressed(args.cache, flux=nf, ivar=ni,
-                            keys=keys.astype("U64"))
+        np.savez_compressed(args.cache, flux=nf, ivar=ni, pos=pos)
         logger.info("cached normalized spectra -> %s", args.cache)
     return table, nf, ni, counts
 
@@ -236,10 +274,32 @@ def _estimator(features, n_components, params, n_label_features):
     return Pipeline([("features", reduce), ("gbm", gbm)])
 
 
+def _folds(n_splits, seed):
+    """
+    Stratified K-fold that keeps every row of a STAR in one fold.
+
+    The benchmark's unit of splitting is the star, not the (APOGEE_ID, source)
+    row: the same star observed by Kepler and K2 must never sit in train for
+    one fold and test for another (stardata's module docstring). A row-level
+    KFold here would leak the same star across the split and quote a purity
+    the bulge could never reproduce, since no bulge star was ever seen in
+    training.
+    """
+    try:
+        from sklearn.model_selection import StratifiedGroupKFold
+        return StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                    random_state=seed), True
+    except ImportError:      # sklearn < 1.0
+        from sklearn.model_selection import GroupKFold
+        logger.warning("sklearn has no StratifiedGroupKFold; falling back to "
+                       "GroupKFold (still star-level, not stratified)")
+        return GroupKFold(n_splits=n_splits), True
+
+
 def out_of_fold(config, table, nf, ni, labeled, n_splits, seed, n_components):
     """ Out-of-fold p(RGB) for the seismically labeled rows, plus the fitted
     full-sample classifier and its p(RGB) over EVERY row. """
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.model_selection import cross_val_predict
 
     name, features, logg_col, feature_list, params = config
     tab = _config_table(table, logg_col, feature_list)
@@ -249,8 +309,10 @@ def out_of_fold(config, table, nf, ni, labeled, n_splits, seed, n_components):
     X_lab = _matrix(tab.loc[labeled], nf[labeled], ni[labeled], features,
                     feature_list)
     clf = _estimator(features, n_comp, params, len(feature_list))
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    proba = cross_val_predict(clf, X_lab, y, cv=cv, method="predict_proba")
+    cv, grouped = _folds(n_splits, seed)
+    groups = tab.loc[labeled, "APOGEE_ID"].to_numpy() if grouped else None
+    proba = cross_val_predict(clf, X_lab, y, cv=cv, groups=groups,
+                              method="predict_proba")
     classes = np.unique(y)
     p_oof = proba[:, list(classes).index(RGB)]
 
@@ -399,8 +461,21 @@ def main(argv=None):
     parser.add_argument("--outdir", default="state_classifier_ablation")
     parser.add_argument("--cache", default=None,
                         help="npz cache of the normalized spectra")
-    parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--folds", type=int, default=DEFAULT_FOLDS,
+                        help="star-level CV folds (default: the benchmark's "
+                             "%d)" % DEFAULT_FOLDS)
+    parser.add_argument("--split-seed", dest="seed", type=int,
+                        default=DEFAULT_SPLIT_SEED,
+                        help="fold seed; the benchmark's split seed (%d) by "
+                             "default" % DEFAULT_SPLIT_SEED)
+    parser.add_argument("--keep-duplicate-spectra", dest="drop_duplicate_spectra",
+                        action="store_false",
+                        help="keep rows repeating an (APOGEE_ID, source) pair; "
+                             "they carry the SAME spectrum, so by default they "
+                             "are dropped as stardata flags them")
+    parser.add_argument("--primary-only", action="store_true",
+                        help="one deterministic best-SNR row per star "
+                             "(stardata.primary_index), as the BNN uses")
     parser.add_argument("--n-components", type=int,
                         default=DEFAULT_SPECTRAL_COMPONENTS)
     parser.add_argument("--target-purity", type=float, default=None,
@@ -483,11 +558,29 @@ def main(argv=None):
     out.to_parquet(os.path.join(args.outdir, "oof_probabilities.parquet"),
                    index=False)
 
+    manifest = dict(
+        merged_path=os.path.abspath(args.spectra),
+        continuum_list=os.path.abspath(args.continuum_list),
+        split_seed=args.seed, folds=args.folds,
+        drop_duplicate_spectra=bool(args.drop_duplicate_spectra),
+        primary_only=bool(args.primary_only),
+        n_spectral_components=args.n_components,
+        production_threshold=PROD_MIN_PROBA, bulge_threshold=BULGE_MIN_PROBA,
+        configs=[dict(name=c[0], features=c[1], logg=c[2], inputs=c[3])
+                 for c in CONFIGS],
+        cuts=cut_counts, n_rows=int(len(table)),
+        n_stars=int(table["APOGEE_ID"].nunique()),
+        n_labeled=int(labeled.sum()),
+        stardata=os.path.dirname(os.path.abspath(stardata.__file__)))
+    with open(os.path.join(args.outdir, "manifest.json"), "w") as fp:
+        json.dump(manifest, fp, indent=2, default=float)
+
     summary = dict(cuts=cut_counts, n_rows=int(len(table)),
                    n_labeled=int(labeled.sum()),
                    n_rgb=int((truth == RGB).sum()),
                    n_heb=int((truth == HEB).sum()),
-                   folds=args.folds, seed=args.seed,
+                   n_stars=int(table["APOGEE_ID"].nunique()),
+                   folds=args.folds, split_seed=args.seed,
                    production_threshold=PROD_MIN_PROBA,
                    bulge_threshold=BULGE_MIN_PROBA,
                    matched_purity_target=target, matched=matched,
@@ -497,8 +590,11 @@ def main(argv=None):
     with open(os.path.join(args.outdir, "summary.json"), "w") as fp:
         json.dump(summary, fp, indent=2, default=float)
 
-    print("\n=== out-of-fold vs seismic truth (n=%d: %d RGB, %d HeB) ==="
-          % (labeled.sum(), (truth == RGB).sum(), (truth == HEB).sum()))
+    print("\n=== out-of-fold vs seismic truth (%d rows / %d stars: "
+          "%d RGB, %d HeB; %d star-level folds, seed %d) ==="
+          % (labeled.sum(), tab_lab["APOGEE_ID"].nunique(),
+             (truth == RGB).sum(), (truth == HEB).sum(), args.folds,
+             args.seed))
     print(cv[cv.is_operating_point].to_string(index=False))
     print("\n=== matched purity (target %.3f = 'full' at its operating "
           "point) ===" % target)
@@ -517,7 +613,8 @@ def main(argv=None):
     print("\n=== whole-sample selection vs production ===")
     print(flips.to_string(index=False))
     print("\nwrote %s/{cv_metrics,completeness_profile,selection_flips}.csv, "
-          "summary.json, oof_probabilities.parquet" % args.outdir)
+          "manifest.json, summary.json, oof_probabilities.parquet"
+          % args.outdir)
     return 0
 
 

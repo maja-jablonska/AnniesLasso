@@ -14,8 +14,21 @@
 #  bulge than on the calibration sample. No GPU: sklearn plus one continuum
 #  normalization pass, which the NPZ cache makes a one-off.
 #
+#  Follows the benchmark's conventions so the numbers are comparable with the
+#  Cannon/Lux/BNN runs: cuts and derivations come from stardata, folds are
+#  STAR-level and seeded with the benchmark's split seed (42), and repeated
+#  (APOGEE_ID, source) rows -- the same spectrum twice -- are dropped.
+#
+#  Overridable via qsub -v (defaults in brackets):
+#    OUT_ROOT    [$HOME/scr_mk27/benchmark_v1]  results land in
+#                                               $OUT_ROOT/state_ablation/
+#    STARDIAG    [$HOME/scr_mk27/stardiag]      checkout providing stardata.py
+#    SPLIT_SEED  [42]                           fold seed (benchmark default)
+#    FOLDS       [5]                            star-level CV folds
+#    EXTRA_ARGS  []                             e.g. "--primary-only"
+#
 #  Submit with:   qsub scripts/compare_state_classifiers.pbs
-#  or override:   qsub -v OUTDIR=$PWD/results/ablation_v2,FOLDS=10 \
+#  or override:   qsub -v OUT_ROOT=$HOME/scr_mk27/benchmark_v5 \
 #                     scripts/compare_state_classifiers.pbs
 # ===========================================================================
 #PBS -N cannon-state-ablation
@@ -35,19 +48,29 @@ set -uo pipefail
 # ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
 PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
-DATA_DIR="${DATA_DIR:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data}"
-# The all-missions labels + spectra table the RGB selection was built from.
+DATA_DIR="${DATA_DIR:-$HOME/scr_mk27/bulge-ages-and-orbits/data}"
+# The all-missions labels + spectra table the RGB selection was built from --
+# the same merged catalogue stardata.build_dataset reads.
 SPECTRA="${SPECTRA:-${DATA_DIR}/merged_with_ages_raw.parquet}"
 CONTINUUM_LIST="${CONTINUUM_LIST:-${DATA_DIR}/continuum.list}"
-OUTDIR="${OUTDIR:-${PROJECT_DIR}/results/state_classifier_ablation}"
+# Sit next to the benchmark this is meant to be read alongside.
+OUT_ROOT="${OUT_ROOT:-$HOME/scr_mk27/benchmark_v1}"
+OUTDIR="${OUTDIR:-${OUT_ROOT}/state_ablation}"
+STARDIAG="${STARDIAG:-$HOME/scr_mk27/stardiag}"
 # Continuum normalization is the slow step; cache it so re-runs are minutes.
 CACHE="${CACHE:-${OUTDIR}/normalized_spectra.npz}"
-FOLDS="${FOLDS:-5}"
-SEED="${SEED:-0}"
+FOLDS="${FOLDS:-5}"                    # benchmark fold count
+SPLIT_SEED="${SPLIT_SEED:-42}"         # benchmark split seed
 N_COMPONENTS="${N_COMPONENTS:-50}"     # must match the production classifier
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 # ---------------------------------------------------------------------------
 
 cd "${PROJECT_DIR}"
+
+if [ ! -f "${STARDIAG}/stardata.py" ]; then
+    echo "[$(date)] ERROR: no stardata.py in ${STARDIAG}; pass STARDIAG=..."
+    exit 1
+fi
 
 for f in "${SPECTRA}" "${CONTINUUM_LIST}"; do
     if [ ! -f "${f}" ]; then
@@ -59,7 +82,7 @@ done
 mkdir -p "${OUTDIR}"
 
 # Run as `python -m scripts.<name>` from the repo root, as the other jobs do.
-export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${PROJECT_DIR}:${STARDIAG}:${PYTHONPATH:-}"
 # sklearn threading: one process, all cores on this node.
 export OMP_NUM_THREADS="${PBS_NCPUS:-12}"
 # No GPU on this queue, and jax is only used by the continuum normalization.
@@ -73,8 +96,9 @@ ${PYTHON_BIN} -m scripts.compare_state_classifiers \
     --outdir "${OUTDIR}" \
     --cache "${CACHE}" \
     --folds "${FOLDS}" \
-    --seed "${SEED}" \
+    --split-seed "${SPLIT_SEED}" \
     --n-components "${N_COMPONENTS}" \
+    ${EXTRA_ARGS} \
     -v
 rc=$?
 
