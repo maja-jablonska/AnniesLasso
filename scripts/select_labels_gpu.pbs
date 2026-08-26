@@ -33,7 +33,7 @@
 #PBS -l ncpus=14
 #PBS -l mem=95GB
 #PBS -l walltime=48:00:00
-#PBS -l storage=scratch/mk27+scratch/y89
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
 #PBS -l wd
 #PBS -j oe
 #PBS -m bae

@@ -29,9 +29,12 @@
 #    FOLDS       [5]                            star-level CV folds
 #    EXTRA_ARGS  []                             e.g. "--primary-only"
 #
-#  Submit with:   qsub scripts/compare_state_classifiers.pbs
-#  or override:   qsub -v OUT_ROOT=$HOME/scr_mk27/benchmark_v5 \
-#                     scripts/compare_state_classifiers.pbs
+#  Submit through the wrapper (never raw qsub -- the shared -M/-m/-j
+#  directives live there):
+#
+#    bash scripts/qsub.sh scripts/compare_state_classifiers.pbs
+#    bash scripts/qsub.sh -v OUT_ROOT=$HOME/scr_mk27/benchmark_v8 \
+#         scripts/compare_state_classifiers.pbs
 # ===========================================================================
 #PBS -N cannon-state-ablation
 #PBS -P dg97
@@ -39,7 +42,7 @@
 #PBS -l ncpus=12
 #PBS -l mem=96GB
 #PBS -l walltime=03:00:00
-#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
 #PBS -l wd
 #PBS -j oe
 #PBS -m bae
@@ -49,7 +52,10 @@ set -uo pipefail
 
 # ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
 PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
-PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
+# The benchmark's own interpreter (stardiag/run_benchmark.pbs), so the
+# ablation runs against the same sklearn/pandas the benchmark did -- hence
+# the gdata/y89 mount above.
+PYTHON_BIN="${PYTHON_BIN:-/g/data/y89/mj8805/miniforge/envs/astro/bin/python}"
 DATA_DIR="${DATA_DIR:-$HOME/scr_mk27/bulge-ages-and-orbits/data}"
 # The all-missions labels + spectra table the RGB selection was built from --
 # the same merged catalogue stardata.build_dataset reads.
