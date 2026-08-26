@@ -1,4 +1,16 @@
 #!/bin/bash
+#PBS -N cannon-state-ablation
+#PBS -P mk27
+#PBS -q rsaa
+#PBS -l ncpus=16
+#PBS -l mem=64GB
+#PBS -l walltime=03:00:00
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
+#PBS -l wd
+#PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
+
 # ===========================================================================
 #  Ablate the RGB/HeB classifier's information content -- CPU-only PBS job.
 #
@@ -38,17 +50,6 @@
 #    bash scripts/qsub.sh -v OUT_ROOT=$HOME/scr_mk27/benchmark_v8 \
 #         scripts/compare_state_classifiers.pbs
 # ===========================================================================
-#PBS -N cannon-state-ablation
-#PBS -P mk27
-#PBS -q rsaa
-#PBS -l ncpus=16
-#PBS -l mem=64GB
-#PBS -l walltime=03:00:00
-#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
-#PBS -l wd
-#PBS -j oe
-#PBS -m bae
-#PBS -M maja.jablonska@anu.edu.au
 
 set -uo pipefail
 

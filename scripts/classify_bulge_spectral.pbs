@@ -1,4 +1,16 @@
 #!/bin/bash
+#PBS -N cannon-classify-bulge-spectral
+#PBS -P mk27
+#PBS -q rsaa
+#PBS -l ncpus=16
+#PBS -l mem=64GB
+#PBS -l walltime=04:00:00
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
+#PBS -l wd
+#PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
+
 # ===========================================================================
 #  Classify a bulge sample into RGB / RC from its SPECTRA -- CPU-only job.
 #
@@ -29,17 +41,6 @@
 #    bash scripts/qsub.sh -v COMPARE=$HOME/scr_mk27/bingo-modern/RGB_RC_classifier/bulge_rgb_bnn.parquet \
 #         scripts/classify_bulge_spectral.pbs
 # ===========================================================================
-#PBS -N cannon-classify-bulge-spectral
-#PBS -P mk27
-#PBS -q rsaa
-#PBS -l ncpus=16
-#PBS -l mem=64GB
-#PBS -l walltime=04:00:00
-#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27+gdata/y89
-#PBS -l wd
-#PBS -j oe
-#PBS -m bae
-#PBS -M maja.jablonska@anu.edu.au
 
 set -uo pipefail
 
