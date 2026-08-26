@@ -1,0 +1,86 @@
+#!/bin/bash
+# ===========================================================================
+#  Ablate the RGB/HeB classifier's information content -- CPU-only PBS job.
+#
+#  Runs scripts/compare_state_classifiers.py: fits the same estimator family
+#  at three information levels (bulge labels with spectroscopic log g / with
+#  seismic log g / production labels + spectral PCA) on the seismically
+#  labelled stars of the all-missions sample, scores every one of them
+#  out-of-fold against seismic truth, and measures what the bulge feature
+#  space costs -- purity, completeness at matched purity, and whether the
+#  lost completeness correlates with [C/N] and hence age.
+#
+#  This is what justifies (or refutes) running a different classifier on the
+#  bulge than on the calibration sample. No GPU: sklearn plus one continuum
+#  normalization pass, which the NPZ cache makes a one-off.
+#
+#  Submit with:   qsub scripts/compare_state_classifiers.pbs
+#  or override:   qsub -v OUTDIR=$PWD/results/ablation_v2,FOLDS=10 \
+#                     scripts/compare_state_classifiers.pbs
+# ===========================================================================
+#PBS -N cannon-state-ablation
+#PBS -P dg97
+#PBS -q normal
+#PBS -l ncpus=12
+#PBS -l mem=96GB
+#PBS -l walltime=03:00:00
+#PBS -l storage=scratch/mk27+scratch/y89+gdata/mk27
+#PBS -l wd
+#PBS -j oe
+#PBS -m bae
+#PBS -M maja.jablonska@anu.edu.au
+
+set -uo pipefail
+
+# ---- user configuration (override any via `qsub -v KEY=VAL,...`) -----------
+PROJECT_DIR="${PBS_O_WORKDIR:-$PWD}"
+PYTHON_BIN="${PYTHON_BIN:-/scratch/y89/mj8805/miniforge/envs/astro/bin/python}"
+DATA_DIR="${DATA_DIR:-/home/100/mj8805/scr_mk27/bulge-ages-and-orbits/data}"
+# The all-missions labels + spectra table the RGB selection was built from.
+SPECTRA="${SPECTRA:-${DATA_DIR}/merged_with_ages_raw.parquet}"
+CONTINUUM_LIST="${CONTINUUM_LIST:-${DATA_DIR}/continuum.list}"
+OUTDIR="${OUTDIR:-${PROJECT_DIR}/results/state_classifier_ablation}"
+# Continuum normalization is the slow step; cache it so re-runs are minutes.
+CACHE="${CACHE:-${OUTDIR}/normalized_spectra.npz}"
+FOLDS="${FOLDS:-5}"
+SEED="${SEED:-0}"
+N_COMPONENTS="${N_COMPONENTS:-50}"     # must match the production classifier
+# ---------------------------------------------------------------------------
+
+cd "${PROJECT_DIR}"
+
+for f in "${SPECTRA}" "${CONTINUUM_LIST}"; do
+    if [ ! -f "${f}" ]; then
+        echo "[$(date)] ERROR: missing input ${f}"
+        exit 1
+    fi
+done
+
+mkdir -p "${OUTDIR}"
+
+# Run as `python -m scripts.<name>` from the repo root, as the other jobs do.
+export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH:-}"
+# sklearn threading: one process, all cores on this node.
+export OMP_NUM_THREADS="${PBS_NCPUS:-12}"
+# No GPU on this queue, and jax is only used by the continuum normalization.
+export JAX_PLATFORMS=cpu
+
+echo "[$(date)] state-classifier ablation on ${SPECTRA} ($(hostname))"
+
+${PYTHON_BIN} -m scripts.compare_state_classifiers \
+    --spectra "${SPECTRA}" \
+    --continuum-list "${CONTINUUM_LIST}" \
+    --outdir "${OUTDIR}" \
+    --cache "${CACHE}" \
+    --folds "${FOLDS}" \
+    --seed "${SEED}" \
+    --n-components "${N_COMPONENTS}" \
+    -v
+rc=$?
+
+if [ ${rc} -eq 0 ]; then
+    echo "[$(date)] ablation finished; results in ${OUTDIR}"
+else
+    echo "[$(date)] ablation FAILED with exit code ${rc}"
+fi
+exit ${rc}
