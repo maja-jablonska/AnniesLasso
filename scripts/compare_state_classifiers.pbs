@@ -20,8 +20,10 @@
 #  (APOGEE_ID, source) rows -- the same spectrum twice -- are dropped.
 #
 #  Overridable via qsub -v (defaults in brackets):
-#    OUT_ROOT    [$HOME/scr_mk27/benchmark_v1]  results land in
-#                                               $OUT_ROOT/state_ablation/
+#    OUT_ROOT    [newest $HOME/scr_mk27/benchmark_v*]  results land in
+#                                               $OUT_ROOT/state_ablation/,
+#                                               and $OUT_ROOT/dataset supplies
+#                                               the merged catalogue + seed
 #    STARDIAG    [$HOME/scr_mk27/stardiag]      checkout providing stardata.py
 #    SPLIT_SEED  [42]                           fold seed (benchmark default)
 #    FOLDS       [5]                            star-level CV folds
@@ -53,9 +55,19 @@ DATA_DIR="${DATA_DIR:-$HOME/scr_mk27/bulge-ages-and-orbits/data}"
 # the same merged catalogue stardata.build_dataset reads.
 SPECTRA="${SPECTRA:-${DATA_DIR}/merged_with_ages_raw.parquet}"
 CONTINUUM_LIST="${CONTINUUM_LIST:-${DATA_DIR}/continuum.list}"
-# Sit next to the benchmark this is meant to be read alongside.
-OUT_ROOT="${OUT_ROOT:-$HOME/scr_mk27/benchmark_v1}"
+# Sit next to the benchmark this is meant to be read alongside. With several
+# benchmark_v* around, default to the highest-numbered one that exists rather
+# than a version pinned in a comment months ago.
+if [ -z "${OUT_ROOT:-}" ]; then
+    OUT_ROOT=$(ls -d "$HOME"/scr_mk27/benchmark_v[0-9]* 2>/dev/null \
+               | sed 's/.*benchmark_v//' | sort -n | tail -1 \
+               | xargs -I{} echo "$HOME/scr_mk27/benchmark_v{}")
+    OUT_ROOT="${OUT_ROOT:-$HOME/scr_mk27/benchmark_v8}"
+fi
 OUTDIR="${OUTDIR:-${OUT_ROOT}/state_ablation}"
+# The dataset dir pins the ablation to that benchmark's merged catalogue,
+# split seed and fold count (its manifest.json).
+DATASET_DIR="${DATASET_DIR:-${OUT_ROOT}/dataset}"
 STARDIAG="${STARDIAG:-$HOME/scr_mk27/stardiag}"
 # Continuum normalization is the slow step; cache it so re-runs are minutes.
 CACHE="${CACHE:-${OUTDIR}/normalized_spectra.npz}"
@@ -72,7 +84,7 @@ if [ ! -f "${STARDIAG}/stardata.py" ]; then
     exit 1
 fi
 
-for f in "${SPECTRA}" "${CONTINUUM_LIST}"; do
+for f in "${CONTINUUM_LIST}"; do
     if [ ! -f "${f}" ]; then
         echo "[$(date)] ERROR: missing input ${f}"
         exit 1
@@ -90,9 +102,17 @@ export JAX_PLATFORMS=cpu
 
 echo "[$(date)] state-classifier ablation on ${SPECTRA} ($(hostname))"
 
+args=( --continuum-list "${CONTINUUM_LIST}" )
+if [ -f "${DATASET_DIR}/manifest.json" ]; then
+    echo "[$(date)] inheriting catalogue, split seed and folds from ${DATASET_DIR}"
+    args+=( --dataset-dir "${DATASET_DIR}" )
+else
+    echo "[$(date)] no dataset manifest in ${DATASET_DIR}; using ${SPECTRA}"
+    args+=( --spectra "${SPECTRA}" )
+fi
+
 ${PYTHON_BIN} -m scripts.compare_state_classifiers \
-    --spectra "${SPECTRA}" \
-    --continuum-list "${CONTINUUM_LIST}" \
+    "${args[@]}" \
     --outdir "${OUTDIR}" \
     --cache "${CACHE}" \
     --folds "${FOLDS}" \

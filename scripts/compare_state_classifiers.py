@@ -28,6 +28,14 @@ fold, as ``stardata`` insists) and seeded with the benchmark's split seed 42,
 and rows repeating an (APOGEE_ID, source) pair -- the same spectrum handed
 out twice -- are dropped rather than allowed to vote twice.
 
+``--dataset-dir <benchmark>/dataset`` inherits that benchmark's merged
+catalogue, split seed and fold count from its ``manifest.json``, so the
+ablation is pinned to the run it will be read beside. It cannot read
+``stars.parquet`` itself: that table is ALREADY RGB-selected, so the rejected
+stars are gone and the HeB negative class -- the thing this classifier has to
+separate -- does not exist in it. The ablation therefore starts from the same
+merged catalogue and re-derives the pre-selection cuts.
+
 It answers the two questions a referee will ask:
 
 1. **What does the bulge feature space actually cost?**  Purity and
@@ -55,9 +63,9 @@ Usage
 ::
 
     python -m scripts.compare_state_classifiers \\
-        --spectra ~/scr_mk27/bulge-ages-and-orbits/data/merged_with_ages_raw.parquet \\
+        --dataset-dir ~/scr_mk27/benchmark_v8/dataset \\
         --continuum-list ~/scr_mk27/bulge-ages-and-orbits/data/continuum.list \\
-        --outdir results/state_classifier_ablation -v
+        --outdir ~/scr_mk27/benchmark_v8/state_ablation -v
 
 The continuum normalization is the expensive step; ``--cache <file.npz>``
 stores it and later runs reuse it (the cache records which rows it was built
@@ -451,11 +459,45 @@ def selection_flips(selections, reference):
 
 # --------------------------------------------------------------------- main
 
+def inherit_from_dataset(args, parser):
+    """
+    Fill unset options from a benchmark dataset's ``manifest.json`` and return
+    what was inherited (empty when ``--dataset-dir`` is absent).
+
+    Only the provenance and the fold conventions are taken: the dataset's own
+    ``stars.parquet`` is already RGB-selected, so it holds neither the stars
+    this classifier rejects nor the HeB class it has to separate.
+    """
+    if not args.dataset_dir:
+        if not args.spectra:
+            parser.error("--spectra is required unless --dataset-dir is given")
+        return {}
+    path = os.path.join(args.dataset_dir, "manifest.json")
+    with open(path) as fp:
+        manifest = json.load(fp)
+    inherited = {}
+    if args.spectra is None:
+        args.spectra = manifest["merged_path"]
+        inherited["merged_path"] = args.spectra
+    for opt, key in (("seed", "seed"), ("folds", "n_folds")):
+        if getattr(args, opt) == parser.get_default(opt) and key in manifest:
+            setattr(args, opt, manifest[key])
+            inherited[key] = manifest[key]
+    inherited["dataset_dir"] = os.path.abspath(args.dataset_dir)
+    return inherited
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Ablate the RGB/HeB classifier's information content.")
-    parser.add_argument("--spectra", required=True,
-                        help="merged_with_ages_raw.parquet (labels + spectra)")
+    parser.add_argument("--dataset-dir", default=None,
+                        help="a benchmark dataset dir (built by "
+                             "stardata.build_dataset); its manifest.json "
+                             "supplies the merged catalogue, split seed and "
+                             "fold count unless overridden")
+    parser.add_argument("--spectra", default=None,
+                        help="merged_with_ages_raw.parquet (labels + spectra); "
+                             "required unless --dataset-dir is given")
     parser.add_argument("--continuum-list", required=True,
                         help="continuum.list used by the training notebook")
     parser.add_argument("--outdir", default="state_classifier_ablation")
@@ -483,6 +525,7 @@ def main(argv=None):
                              "config's purity at its production threshold")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
+    inherited = inherit_from_dataset(args, parser)
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
@@ -561,7 +604,7 @@ def main(argv=None):
     manifest = dict(
         merged_path=os.path.abspath(args.spectra),
         continuum_list=os.path.abspath(args.continuum_list),
-        split_seed=args.seed, folds=args.folds,
+        split_seed=args.seed, folds=args.folds, inherited=inherited,
         drop_duplicate_spectra=bool(args.drop_duplicate_spectra),
         primary_only=bool(args.primary_only),
         n_spectral_components=args.n_components,
